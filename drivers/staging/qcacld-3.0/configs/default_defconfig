@@ -234,7 +234,7 @@ endif
 	CONFIG_WLAN_DL_MODES := y
 endif
 
-CONFIG_WLAN_POWER_DEBUG := y
+CONFIG_WLAN_POWER_DEBUG := n
 #Enable Beacon Reception Stats
 CONFIG_FEATURE_BECN_STATS := y
 endif
@@ -480,7 +480,7 @@ CONFIG_MARK_ICMP_REQ_TO_FW := y
 #
 # Enable VERBOSE debug INI mechanism
 #
-CONFIG_VERBOSE_DEBUG := y
+CONFIG_VERBOSE_DEBUG := n
 CONFIG_RX_DESC_SANITY_WAR := y
 ifeq ($(CONFIG_PCI_MSM), y)
 	CONFIG_FEATURE_HAL_DELAYED_REG_WRITE := y
@@ -593,7 +593,7 @@ endif
 # Feature flags which are not (currently) configurable via Kconfig
 
 #Whether to build debug version
-BUILD_DEBUG_VERSION := y
+BUILD_DEBUG_VERSION := n
 
 #Enable this flag to build driver in diag version
 BUILD_DIAG_VERSION := y
@@ -610,10 +610,10 @@ else
 endif
 
 # Compile all log levels by default
-CONFIG_WLAN_LOG_FATAL := y
-CONFIG_WLAN_LOG_ERROR := y
-CONFIG_WLAN_LOG_WARN := y
-CONFIG_WLAN_LOG_INFO := y
+CONFIG_WLAN_LOG_FATAL := n
+CONFIG_WLAN_LOG_ERROR := n
+CONFIG_WLAN_LOG_WARN := n
+CONFIG_WLAN_LOG_INFO := n
 
 #Enable OL debug and wmi unified functions
 CONFIG_ATH_PERF_PWR_OFFLOAD := y
@@ -863,7 +863,7 @@ CONFIG_QCA_SIGNED_SPLIT_BINARY_SUPPORT := n
 CONFIG_QCA_SINGLE_BINARY_SUPPORT := n
 
 #Enable collecting target RAM dump after kernel panic
-CONFIG_TARGET_RAMDUMP_AFTER_KERNEL_PANIC := y
+CONFIG_TARGET_RAMDUMP_AFTER_KERNEL_PANIC := n
 
 #Flag to enable/disable secure firmware feature
 CONFIG_FEATURE_SECURE_FIRMWARE := n
@@ -1141,10 +1141,10 @@ CONFIG_WLAN_FEATURE_PKT_CAPTURE := y
 endif
 
 #Enable RX RING buffers debug
-CONFIG_DEBUG_RX_RING_BUFFER := y
+CONFIG_DEBUG_RX_RING_BUFFER := n
 
 #Enable Hash debug
-CONFIG_RX_HASH_DEBUG := y
+CONFIG_RX_HASH_DEBUG := n
 
 #Flag to enable roam offload compilation of connection manager module
 CONFIG_CM_ROAM_OFFLOAD := y
@@ -1164,7 +1164,7 @@ CONFIG_DP_SWLM := y
 endif
 
 #Enable Hang Event
-CONFIG_WLAN_HANG_EVENT := y
+CONFIG_WLAN_HANG_EVENT := n
 
 ifeq ($(CONFIG_CNSS_QCA6750), y)
 ifeq ($(CONFIG_FW_THERMAL_THROTTLE), y)
