@@ -3833,6 +3833,9 @@ static int load_module(struct load_info *info, const char __user *uargs,
 	long err = 0;
 	char *after_dashes;
 
+#ifdef CONFIG_MODULE_FAKE_LOAD_SUCCESS_WITHOUT_LOADING
+	return 0;
+#endif
 	err = elf_header_check(info);
 	if (err)
 		goto free_copy;
