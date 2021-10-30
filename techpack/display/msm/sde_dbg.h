@@ -49,8 +49,7 @@ enum sde_dbg_dump_context {
 	SDE_DBG_DUMP_CLK_ENABLED_CTX,
 };
 
-#define SDE_EVTLOG_DEFAULT_ENABLE (SDE_EVTLOG_CRITICAL | SDE_EVTLOG_IRQ | \
-		SDE_EVTLOG_EXTERNAL)
+#define SDE_EVTLOG_DEFAULT_ENABLE 0
 
 /*
  * evtlog will print this number of entries when it is called through
