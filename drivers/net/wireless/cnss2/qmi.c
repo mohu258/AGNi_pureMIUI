@@ -22,6 +22,7 @@
 #define ELF_BDF_FILE_NAME_K11_GLOBAL     "bd_k11gl.elf"
 #define ELF_BDF_FILE_NAME_K11_NO_CRYSTAL            "bd_k11_2.elf"
 #define ELF_BDF_FILE_NAME_K11_GLOBAL_NO_CRYSTAL     "bd_k11gl_2.elf"
+#define ELF_BDF_FILE_NAME_K11_INDIA                 "bd_k11in_2.elf"
 
 #define BIN_BDF_FILE_NAME		"bdwlan.bin"
 #define BIN_BDF_FILE_NAME_PREFIX	"bdwlan.b"
@@ -502,7 +503,10 @@ static int cnss_get_bdf_file_name(struct cnss_plat_data *plat_priv,
 			if (hw_platform_ver == HARDWARE_PROJECT_K2) {
 				snprintf(filename_tmp, filename_len, ELF_BDF_FILE_NAME_K2);
 			} else if (hw_platform_ver == HARDWARE_PROJECT_K11) {
-				if((uint32_t)CountryGlobal == hw_country_ver){
+				if ((uint32_t)CountryIndia == hw_country_ver) {
+						snprintf(filename_tmp, filename_len, ELF_BDF_FILE_NAME_K11_INDIA);
+						pr_info("cnss2: ELF_BDF_FILE_NAME_K11_INDIA loaded");
+				} else if((uint32_t)CountryGlobal == hw_country_ver){
 					if ((hw_version_build < 2) || ((hw_version_major == 22) && (hw_version_minor == 0)))
 						snprintf(filename_tmp, filename_len, ELF_BDF_FILE_NAME_K11_GLOBAL);
 					else
