@@ -6,32 +6,23 @@ KERNELDIR=`readlink -f .`
 
 DEVICE="haydn"
 CONFIG1="agni_haydn_defconfig"
-export AGNI_BUILD_TYPE="unified"
+export AGNI_BUILD_TYPE="AOSP"
 SYNC_CONFIG=1
 
 . $KERNELDIR/AGNi_version.sh
 FILENAME="AGNi_kernel-$DEVICE-$AGNI_VERSION_PREFIX-$AGNI_VERSION-$AGNI_BUILD_TYPE.zip"
-
-# AGNi CCACHE SHIFTING TO SDM660
-export CCACHE_SDM660="0"
-export CCACHE_MIATOLL_Q="0"
-export CCACHE_MIATOLL_R="1"
-. ~/WORKING_DIRECTORY/ccache_shifter.sh
-
-exit_reset() {
-	export CCACHE_SDM660="0"
-	export CCACHE_MIATOLL_Q="0"
-	export CCACHE_MIATOLL_R="0"
-	. ~/WORKING_DIRECTORY/ccache_shifter.sh
-	sync
-	exit
-}
 
 if [ -f ~/WORKING_DIRECTORY/AGNi_stamp.sh ]; then
 	. ~/WORKING_DIRECTORY/AGNi_stamp.sh
 fi
 if [ -f ~/WORKING_DIRECTORY/snapdragon_llvm.sh ]; then
 	. ~/WORKING_DIRECTORY/snapdragon_llvm.sh
+else
+	export CROSS_COMPILE=/PATH_TO/snapdragon_llvm_aarch64_v12.1.1/bin/aarch64-linux-android-
+	export CROSS_COMPILE_ARM32=/PATH_TO/snapdragon_llvm_arm_v12.1.1/bin/arm-linux-androideabi-
+	export CLANG_TRIPLE=aarch64-linux-gnu
+	#32bit VDSO
+	export CROSS_COMPILE_COMPAT=/PATH_TO/snapdragon_llvm_arm_v12.1.1/bin/arm-linux-androideabi-
 fi
 
 if [ ! -d $COMPILEDIR_HAYDN ]; then
@@ -65,7 +56,7 @@ echo ""
 rm $COMPILEDIR_HAYDN/.config 2>/dev/null
 
 make O=$COMPILEDIR_HAYDN $CONFIG1
-make -j4 O=$COMPILEDIR_HAYDN
+make -j`nproc --ignore=2` O=$COMPILEDIR_HAYDN
 
 if [ $SYNC_CONFIG -eq 1 ]; then # SYNC CONFIG
 	cp -f $COMPILEDIR_HAYDN/.config $KERNELDIR/arch/arm64/configs/$CONFIG1
@@ -75,12 +66,11 @@ rm $COMPILEDIR_HAYDN/.config $COMPILEDIR_HAYDN/.config.old 2>/dev/null
 if ([ -f $COMPILEDIR_HAYDN/arch/arm64/boot/Image ]); then
 	mv $COMPILEDIR_HAYDN/arch/arm64/boot/Image $KERNELDIR/$DIR/Image
 #	./scripts/dtc/libfdt/mkdtboimg.py create $COMPILEDIR_HAYDN/arch/arm64/boot/dtbo.img $COMPILEDIR_HAYDN/arch/arm64/boot/dts/qcom/*.dtb
-	mv $COMPILEDIR_HAYDN/arch/arm64/boot/dtb.img $KERNELDIR/$DIR/dtb.img
+#	mv $COMPILEDIR_HAYDN/arch/arm64/boot/dtb.img $KERNELDIR/$DIR/dtb.img
 	mv $COMPILEDIR_HAYDN/arch/arm64/boot/dtbo.img $KERNELDIR/$DIR/dtbo.img
 else
 	echo "         ERROR: Cross-compiling AGNi kernel $DEVICE."
 	rm -rf $KERNELDIR/$DIR
-	exit_reset;
 fi
 
 echo ""
@@ -102,10 +92,4 @@ if [ -f $KERNELDIR/$DIR/Image ]; then
 else
 	echo " >>>>> AGNi $DEVICE BUILD ERROR <<<<<"
 fi
-
-# AGNi CCACHE RESET
-export CCACHE_SDM660="0"
-export CCACHE_MIATOLL_Q="0"
-export CCACHE_MIATOLL_R="0"
-. ~/WORKING_DIRECTORY/ccache_shifter.sh
 

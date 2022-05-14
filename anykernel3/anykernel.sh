@@ -21,7 +21,7 @@ device.name8=K40 Pro
 device.name9=K40 Pro+
 device.name10=milahaina
 device.name11=haydnin
-supported.versions=11,12
+supported.versions=12
 supported.patchlevels=
 '; } # end properties
 
@@ -83,8 +83,8 @@ if mountpoint -q /data; then
 fi
 
 ## Trim partitions
-ui_print "Running fstrim optimisation on f2fs /data.."
-$bin/busybox fstrim -v /data;
+#ui_print "Running fstrim optimisation on f2fs /data.."
+#$bin/busybox fstrim -v /data;
 
 ui_print "Preparing for boot install.."
 ## AnyKernel boot install
