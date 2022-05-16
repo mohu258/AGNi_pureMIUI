@@ -156,7 +156,6 @@ end:
 }
 #endif
 
-#ifdef ROAM_OFFLOAD_V1
 #if defined(WLAN_FEATURE_HOST_ROAM) || defined(WLAN_FEATURE_ROAM_OFFLOAD)
 QDF_STATUS wlan_cm_tgt_send_roam_offload_init(struct wlan_objmgr_psoc *psoc,
 					      uint8_t vdev_id, bool is_init)
@@ -171,6 +170,11 @@ QDF_STATUS wlan_cm_tgt_send_roam_offload_init(struct wlan_objmgr_psoc *psoc,
 						    WLAN_MLME_NB_ID);
 	if (!vdev)
 		return QDF_STATUS_E_INVAL;
+
+	if (wlan_vdev_mlme_get_opmode(vdev) != QDF_STA_MODE) {
+		wlan_objmgr_vdev_release_ref(vdev, WLAN_MLME_NB_ID);
+		return QDF_STATUS_E_INVAL;
+	}
 
 	roam_tx_ops = wlan_cm_roam_get_tx_ops_from_vdev(vdev);
 	if (!roam_tx_ops || !roam_tx_ops->send_roam_offload_init_req) {
@@ -417,4 +421,3 @@ QDF_STATUS wlan_cm_tgt_send_roam_disable_config(struct wlan_objmgr_psoc *psoc,
 
 	return status;
 }
-#endif

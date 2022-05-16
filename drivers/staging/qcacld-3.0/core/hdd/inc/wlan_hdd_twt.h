@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2020 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2021 The Linux Foundation. All rights reserved.
  *
  * Permission to use, copy, modify, and/or distribute this software for
  * any purpose with or without fee is hereby granted, provided that the
@@ -41,6 +41,12 @@ struct wmi_twt_resume_dialog_cmd_param;
 
 extern const struct nla_policy
 wlan_hdd_wifi_twt_config_policy[QCA_WLAN_VENDOR_ATTR_CONFIG_TWT_MAX + 1];
+
+#define FEATURE_TWT_VENDOR_EVENTS                                   \
+[QCA_NL80211_VENDOR_SUBCMD_CONFIG_TWT_INDEX] = {                    \
+	.vendor_id = QCA_NL80211_VENDOR_ID,                         \
+	.subcmd = QCA_NL80211_VENDOR_SUBCMD_CONFIG_TWT,             \
+},
 
 /**
  * enum twt_role - TWT role definitions
@@ -124,20 +130,40 @@ void hdd_update_tgt_twt_cap(struct hdd_context *hdd_ctx,
 			    struct wma_tgt_cfg *cfg);
 
 /**
- * hdd_send_twt_enable_cmd() - Send TWT enable command to target
- * @hdd_ctx: HDD Context
- *
- * Return: None
- */
-void hdd_send_twt_enable_cmd(struct hdd_context *hdd_ctx);
-
-/**
- * hdd_send_twt_disable_cmd() - Send TWT disable command to target
+ * hdd_send_twt_requestor_enable_cmd() - Send TWT requestor enable command to
+ * target
  * @hdd_ctx: HDD Context
  *
  * Return: QDF_STATUS
  */
-QDF_STATUS hdd_send_twt_disable_cmd(struct hdd_context *hdd_ctx);
+QDF_STATUS hdd_send_twt_requestor_enable_cmd(struct hdd_context *hdd_ctx);
+
+/**
+ * hdd_send_twt_responder_enable_cmd() - Send TWT responder enable command to
+ * target
+ * @hdd_ctx: HDD Context
+ *
+ * Return: QDF_STATUS
+ */
+QDF_STATUS hdd_send_twt_responder_enable_cmd(struct hdd_context *hdd_ctx);
+
+/**
+ * hdd_send_twt_requestor_disable_cmd() - Send TWT requestor disable command
+ * to target
+ * @hdd_ctx: HDD Context
+ *
+ * Return: QDF_STATUS
+ */
+QDF_STATUS hdd_send_twt_requestor_disable_cmd(struct hdd_context *hdd_ctx);
+
+/**
+ * hdd_send_twt_responder_disable_cmd() - Send TWT responder disable command
+ * to target
+ * @hdd_ctx: HDD Context
+ *
+ * Return: QDF_STATUS
+ */
+QDF_STATUS hdd_send_twt_responder_disable_cmd(struct hdd_context *hdd_ctx);
 
 /**
  * wlan_hdd_twt_init() - Initialize TWT
@@ -199,6 +225,17 @@ int hdd_test_config_twt_terminate_session(struct hdd_adapter *adapter,
 void hdd_send_twt_role_disable_cmd(struct hdd_context *hdd_ctx,
 				   enum twt_role role);
 
+/**
+ * hdd_send_twt_del_all_sessions_to_userspace() - Terminate all TWT sessions
+ * @adapter: adapter
+ *
+ * This function checks if association exists and TWT session is setup,
+ * then send the TWT teardown vendor NL event to the user space.
+ *
+ * Return: None
+ */
+void hdd_send_twt_del_all_sessions_to_userspace(struct hdd_adapter *adapter);
+
 #define FEATURE_VENDOR_SUBCMD_WIFI_CONFIG_TWT                            \
 {                                                                        \
 	.info.vendor_id = QCA_NL80211_VENDOR_ID,                         \
@@ -218,13 +255,28 @@ static inline void hdd_update_tgt_twt_cap(struct hdd_context *hdd_ctx,
 {
 }
 
-static inline void hdd_send_twt_enable_cmd(struct hdd_context *hdd_ctx)
+static inline
+QDF_STATUS hdd_send_twt_requestor_enable_cmd(struct hdd_context *hdd_ctx)
 {
+	return QDF_STATUS_E_NOSUPPORT;
 }
 
-static inline QDF_STATUS hdd_send_twt_disable_cmd(struct hdd_context *hdd_ctx)
+static inline
+QDF_STATUS hdd_send_twt_responder_enable_cmd(struct hdd_context *hdd_ctx)
 {
-	return QDF_STATUS_SUCCESS;
+	return QDF_STATUS_E_NOSUPPORT;
+}
+
+static inline
+QDF_STATUS hdd_send_twt_requestor_disable_cmd(struct hdd_context *hdd_ctx)
+{
+	return QDF_STATUS_E_NOSUPPORT;
+}
+
+static inline
+QDF_STATUS hdd_send_twt_responder_disable_cmd(struct hdd_context *hdd_ctx)
+{
+	return QDF_STATUS_E_NOSUPPORT;
 }
 
 static inline void wlan_hdd_twt_init(struct hdd_context *hdd_ctx)
@@ -252,6 +304,11 @@ int hdd_test_config_twt_terminate_session(struct hdd_adapter *adapter,
 static inline
 void hdd_send_twt_role_disable_cmd(struct hdd_context *hdd_ctx,
 				   enum twt_role role)
+{
+}
+
+static inline
+void hdd_send_twt_del_all_sessions_to_userspace(struct hdd_adapter *adapter)
 {
 }
 #define FEATURE_VENDOR_SUBCMD_WIFI_CONFIG_TWT
