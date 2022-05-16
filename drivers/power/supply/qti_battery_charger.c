@@ -1229,7 +1229,7 @@ static void handle_notification(struct battery_chg_dev *bcdev, void *data,
 		return;
 	}
 
-	pr_err("notification: %#x\n", notify_msg->notification);
+//	pr_err("notification: %#x\n", notify_msg->notification);
 
 	switch (notify_msg->notification) {
 	case BC_BATTERY_STATUS_GET:
@@ -4493,7 +4493,7 @@ static ssize_t request_vdm_cmd_show(struct class *c,
 		return rc;
 
 	cmd = pst->prop[XM_PROP_UVDM_STATE];
-	pr_info("request_vdm_cmd_show  uvdm_state: %d\n", cmd);
+//	pr_info("request_vdm_cmd_show  uvdm_state: %d\n", cmd);
 
 	switch (cmd){
 	  case USBPD_UVDM_CHARGER_VERSION:
@@ -5364,7 +5364,7 @@ static void xm_charger_debug_info_print_work(struct work_struct *work)
 			usb_present = val.intval;
 		else
 			usb_present = 0;
-		pr_err("usb_present: %d\n", usb_present);
+//		pr_err("usb_present: %d\n", usb_present);
 	} else {
 		return;
 	}
@@ -5382,7 +5382,7 @@ static void xm_charger_debug_info_print_work(struct work_struct *work)
 		else
 			ibus_ua = 0;
 
-		pr_err("vbus_vol_uv: %d, ibus_ua: %d\n", vbus_vol_uv, ibus_ua);
+//		pr_err("vbus_vol_uv: %d, ibus_ua: %d\n", vbus_vol_uv, ibus_ua);
 		interval = CHARGING_PERIOD_S;
 	} else {
 		interval = DISCHARGE_PERIOD_S;
