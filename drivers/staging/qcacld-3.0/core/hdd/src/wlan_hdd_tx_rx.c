@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2020 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2021 The Linux Foundation. All rights reserved.
  *
  * Permission to use, copy, modify, and/or distribute this software for
  * any purpose with or without fee is hereby granted, provided that the
@@ -1061,6 +1061,11 @@ static void __hdd_hard_start_xmit(struct sk_buff *skb,
 	if (wlan_hdd_validate_context(hdd_ctx))
 		goto drop_pkt;
 
+	if (hdd_ctx->hdd_wlan_suspended) {
+		hdd_err_rl("Device is system suspended, drop pkt");
+		goto drop_pkt;
+	}
+
 	wlan_hdd_classify_pkt(skb);
 	if (QDF_NBUF_CB_GET_PACKET_TYPE(skb) == QDF_NBUF_CB_PACKET_TYPE_ARP) {
 		if (qdf_nbuf_data_is_arp_req(skb) &&
@@ -1569,6 +1574,73 @@ static bool hdd_is_mcast_replay(struct sk_buff *skb)
 				skb->dev->dev_addr)))
 			return true;
 	}
+	return false;
+}
+
+/**
+ * hdd_is_arp_local() - check if local or non local arp
+ * @skb: pointer to sk_buff
+ *
+ * Return: true if local arp or false otherwise.
+ */
+static bool hdd_is_arp_local(struct sk_buff *skb)
+{
+	struct arphdr *arp;
+	struct in_ifaddr **ifap = NULL;
+	struct in_ifaddr *ifa = NULL;
+	struct in_device *in_dev;
+	unsigned char *arp_ptr;
+	__be32 tip;
+
+	arp = (struct arphdr *)skb->data;
+	if (arp->ar_op == htons(ARPOP_REQUEST)) {
+		/* if fail to acquire rtnl lock, assume it's local arp */
+		if (!rtnl_trylock())
+			return true;
+
+		in_dev = __in_dev_get_rtnl(skb->dev);
+		if (in_dev) {
+			for (ifap = &in_dev->ifa_list; (ifa = *ifap) != NULL;
+				ifap = &ifa->ifa_next) {
+				if (!strcmp(skb->dev->name, ifa->ifa_label))
+					break;
+			}
+		}
+
+		if (ifa && ifa->ifa_local) {
+			arp_ptr = (unsigned char *)(arp + 1);
+			arp_ptr += (skb->dev->addr_len + 4 +
+					skb->dev->addr_len);
+			memcpy(&tip, arp_ptr, 4);
+			hdd_debug("ARP packet: local IP: %x dest IP: %x",
+				ifa->ifa_local, tip);
+			if (ifa->ifa_local == tip) {
+				rtnl_unlock();
+				return true;
+			}
+		}
+		rtnl_unlock();
+	}
+
+	return false;
+}
+
+/**
+ * hdd_is_rx_wake_lock_needed() - check if wake lock is needed
+ * @skb: pointer to sk_buff
+ *
+ * RX wake lock is needed for:
+ * 1) Unicast data packet OR
+ * 2) Local ARP data packet
+ *
+ * Return: true if wake lock is needed or false otherwise.
+ */
+static bool hdd_is_rx_wake_lock_needed(struct sk_buff *skb)
+{
+	if ((skb->pkt_type != PACKET_BROADCAST &&
+	     skb->pkt_type != PACKET_MULTICAST) || hdd_is_arp_local(skb))
+		return true;
+
 	return false;
 }
 
@@ -2134,6 +2206,33 @@ void hdd_set_fisa_disallowed_for_vdev(ol_txrx_soc_handle soc, uint8_t vdev_id,
 
 #ifdef WLAN_FEATURE_DYNAMIC_RX_AGGREGATION
 /**
+ * hdd_is_chain_list_non_empty_for_clsact_qdisc() - Check if chain_list in
+ *  ingress block is non-empty for a clsact qdisc.
+ * @qdisc: pointer to clsact qdisc
+ *
+ * Return: true if chain_list is not empty else false
+ */
+static bool
+hdd_is_chain_list_non_empty_for_clsact_qdisc(struct Qdisc *qdisc)
+{
+	const struct Qdisc_class_ops *cops;
+	struct tcf_block *ingress_block;
+
+	cops = qdisc->ops->cl_ops;
+	if (qdf_unlikely(!cops || !cops->tcf_block))
+		return false;
+
+	ingress_block = cops->tcf_block(qdisc, TC_H_MIN_INGRESS, NULL);
+	if (qdf_unlikely(!ingress_block))
+		return false;
+
+	if (list_empty(&ingress_block->chain_list))
+		return false;
+	else
+		return true;
+}
+
+/**
  * hdd_rx_check_qdisc_for_adapter() - Check if any ingress qdisc is configured
  *  for given adapter
  * @adapter: pointer to HDD adapter context
@@ -2150,39 +2249,34 @@ hdd_rx_check_qdisc_for_adapter(struct hdd_adapter *adapter, uint8_t rx_ctx_id)
 	ol_txrx_soc_handle soc = cds_get_context(QDF_MODULE_ID_SOC);
 	struct netdev_queue *ingress_q;
 	struct Qdisc *ingress_qdisc;
-	bool is_qdisc_ingress = false;
 
 	if (qdf_unlikely(!soc))
 		return;
 
-	/*
-	 * This additional ingress_queue NULL check is to avoid
-	 * doing RCU lock/unlock in the common scenario where
-	 * ingress_queue is not configured by default
-	 */
-	if (qdf_likely(!adapter->dev->ingress_queue))
+	if (!adapter->dev->ingress_queue)
 		goto reset_wl;
 
 	rcu_read_lock();
-	ingress_q = rcu_dereference(adapter->dev->ingress_queue);
 
+	ingress_q = rcu_dereference(adapter->dev->ingress_queue);
 	if (qdf_unlikely(!ingress_q))
 		goto reset;
 
 	ingress_qdisc = rcu_dereference(ingress_q->qdisc);
-	if (!ingress_qdisc)
+	if (qdf_unlikely(!ingress_qdisc))
 		goto reset;
 
-	is_qdisc_ingress = qdf_str_eq(ingress_qdisc->ops->id, "ingress");
-	if (!is_qdisc_ingress)
+	if (!(qdf_str_eq(ingress_qdisc->ops->id, "ingress") ||
+	      (qdf_str_eq(ingress_qdisc->ops->id, "clsact") &&
+	       hdd_is_chain_list_non_empty_for_clsact_qdisc(ingress_qdisc))))
 		goto reset;
 
 	rcu_read_unlock();
 
-	if (adapter->gro_disallowed[rx_ctx_id])
+	if (qdf_likely(adapter->gro_disallowed[rx_ctx_id]))
 		return;
 
-	hdd_debug("ingress qdisc configured disable GRO");
+	hdd_debug("ingress qdisc/filter configured disable GRO");
 	adapter->gro_disallowed[rx_ctx_id] = 1;
 	hdd_set_fisa_disallowed_for_vdev(soc, adapter->vdev_id, rx_ctx_id, 1);
 
@@ -2192,8 +2286,8 @@ reset:
 	rcu_read_unlock();
 
 reset_wl:
-	if (adapter->gro_disallowed[rx_ctx_id]) {
-		hdd_debug("ingress qdisc removed enable GRO");
+	if (qdf_unlikely(adapter->gro_disallowed[rx_ctx_id])) {
+		hdd_debug("ingress qdisc/filter removed enable GRO");
 		hdd_set_fisa_disallowed_for_vdev(soc, adapter->vdev_id,
 						 rx_ctx_id, 0);
 		adapter->gro_disallowed[rx_ctx_id] = 0;
@@ -2246,7 +2340,8 @@ QDF_STATUS hdd_rx_deliver_to_stack(struct hdd_adapter *adapter,
 	adapter->hdd_stats.tx_rx_stats.rx_non_aggregated++;
 
 	/* Account for GRO/LRO ineligible packets, mostly UDP */
-	hdd_ctx->no_rx_offload_pkt_cnt++;
+	if (qdf_nbuf_get_gso_segs(skb) == 0)
+		hdd_ctx->no_rx_offload_pkt_cnt++;
 
 	if (qdf_likely((hdd_ctx->enable_dp_rx_threads ||
 		        hdd_ctx->enable_rxthread) &&
@@ -2304,7 +2399,8 @@ QDF_STATUS hdd_rx_deliver_to_stack(struct hdd_adapter *adapter,
 	adapter->hdd_stats.tx_rx_stats.rx_non_aggregated++;
 
 	/* Account for GRO/LRO ineligible packets, mostly UDP */
-	hdd_ctx->no_rx_offload_pkt_cnt++;
+	if (qdf_nbuf_get_gso_segs(skb) == 0)
+		hdd_ctx->no_rx_offload_pkt_cnt++;
 
 	if (qdf_likely((hdd_ctx->enable_dp_rx_threads ||
 		        hdd_ctx->enable_rxthread) &&
@@ -2409,6 +2505,7 @@ QDF_STATUS hdd_rx_packet_cbk(void *adapter_context,
 	struct hdd_station_ctx *sta_ctx = NULL;
 	unsigned int cpu_index;
 	struct qdf_mac_addr *mac_addr, *dest_mac_addr;
+	bool wake_lock = false;
 	uint8_t pkt_type = 0;
 	bool track_arp = false;
 	struct wlan_objmgr_vdev *vdev;
@@ -2518,19 +2615,19 @@ QDF_STATUS hdd_rx_packet_cbk(void *adapter_context,
 		dest_mac_addr = (struct qdf_mac_addr *)(skb->data);
 		mac_addr = (struct qdf_mac_addr *)(skb->data+QDF_MAC_ADDR_SIZE);
 
-		if (!hdd_is_current_high_throughput(hdd_ctx)) {
-			vdev = hdd_objmgr_get_vdev(adapter);
-			if (vdev) {
-				ucfg_tdls_update_rx_pkt_cnt(vdev, mac_addr,
-							    dest_mac_addr);
-				hdd_objmgr_put_vdev(vdev);
-			}
+		vdev = hdd_objmgr_get_vdev(adapter);
+		if (vdev) {
+			ucfg_tdls_update_rx_pkt_cnt(vdev, mac_addr,
+						    dest_mac_addr);
+			hdd_objmgr_put_vdev(vdev);
 		}
 
 		skb->dev = adapter->dev;
 		skb->protocol = eth_type_trans(skb, skb->dev);
 		++adapter->hdd_stats.tx_rx_stats.rx_packets[cpu_index];
 		++adapter->stats.rx_packets;
+		/* count aggregated RX frame into stats */
+		adapter->stats.rx_packets += qdf_nbuf_get_gso_segs(skb);
 		adapter->stats.rx_bytes += skb->len;
 
 		/* Incr GW Rx count for NUD tracking based on GW mac addr */
@@ -2543,6 +2640,21 @@ QDF_STATUS hdd_rx_packet_cbk(void *adapter_context,
 						rx_usolict_arp_n_mcast_drp);
 			qdf_nbuf_free(skb);
 			continue;
+		}
+
+		/* hold configurable wakelock for unicast traffic */
+		if (!hdd_is_current_high_throughput(hdd_ctx) &&
+		    hdd_ctx->config->rx_wakelock_timeout &&
+		    sta_ctx->conn_info.is_authenticated)
+			wake_lock = hdd_is_rx_wake_lock_needed(skb);
+
+		if (wake_lock) {
+			cds_host_diag_log_work(&hdd_ctx->rx_wake_lock,
+						   hdd_ctx->config->rx_wakelock_timeout,
+						   WIFI_POWER_EVENT_WAKELOCK_HOLD_RX);
+			qdf_wake_lock_timeout_acquire(&hdd_ctx->rx_wake_lock,
+							  hdd_ctx->config->
+								  rx_wakelock_timeout);
 		}
 
 		/* Remove SKB from internal tracking table before submitting
@@ -2589,11 +2701,6 @@ QDF_STATUS hdd_rx_packet_cbk(void *adapter_context,
 				hdd_tx_rx_collect_connectivity_stats_info(
 					skb, adapter,
 					PKT_TYPE_RX_REFUSED, &pkt_type);
-			DPTRACE(qdf_dp_log_proto_pkt_info(NULL, NULL, 0, 0,
-						      QDF_RX,
-						      QDF_TRACE_DEFAULT_MSDU_ID,
-						      QDF_TX_RX_STATUS_DROP));
-
 		}
 	}
 
@@ -3304,6 +3411,9 @@ void hdd_reset_tcp_delack(struct hdd_context *hdd_ctx)
 	enum wlan_tp_level next_level = WLAN_SVC_TP_LOW;
 	struct wlan_rx_tp_data rx_tp_data = {0};
 
+	if (!hdd_ctx->en_tcp_delack_no_lro)
+		return;
+
 	rx_tp_data.rx_tp_flags |= TCP_DEL_ACK_IND;
 	rx_tp_data.level = next_level;
 	hdd_ctx->rx_high_ind_cnt = 0;
@@ -3634,6 +3744,8 @@ void hdd_dp_cfg_update(struct wlan_objmgr_psoc *psoc,
 	hdd_set_rx_mode_value(hdd_ctx);
 	config->multicast_replay_filter =
 		cfg_get(psoc, CFG_DP_FILTER_MULTICAST_REPLAY);
+	config->rx_wakelock_timeout =
+		cfg_get(psoc, CFG_DP_RX_WAKELOCK_TIMEOUT);
 	config->num_dp_rx_threads = cfg_get(psoc, CFG_DP_NUM_DP_RX_THREADS);
 	config->cfg_wmi_credit_cnt = cfg_get(psoc, CFG_DP_HTC_WMI_CREDIT_CNT);
 	config->icmp_req_to_fw_mark_interval =
