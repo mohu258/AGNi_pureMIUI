@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2021, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/uaccess.h>
@@ -1062,8 +1062,7 @@ static bool cam_icp_update_clk_free(struct cam_icp_hw_mgr *hw_mgr,
 
 static bool cam_icp_debug_clk_update(struct cam_icp_clk_info *hw_mgr_clk_info)
 {
-	if (icp_hw_mgr.icp_debug_clk < ICP_CLK_TURBO_HZ &&
-		icp_hw_mgr.icp_debug_clk &&
+	if (icp_hw_mgr.icp_debug_clk &&
 		icp_hw_mgr.icp_debug_clk != hw_mgr_clk_info->curr_clk) {
 		hw_mgr_clk_info->base_clk = icp_hw_mgr.icp_debug_clk;
 		hw_mgr_clk_info->curr_clk = icp_hw_mgr.icp_debug_clk;
@@ -1350,10 +1349,16 @@ static bool cam_icp_check_clk_update(struct cam_icp_hw_mgr *hw_mgr,
 	if (!clk_info->frame_cycles)
 		return cam_icp_default_clk_update(hw_mgr_clk_info);
 
-	/* Calculate base clk rate */
-	base_clk = cam_icp_mgr_calc_base_clk(
-		clk_info->frame_cycles, clk_info->budget_ns);
 	ctx_data->clk_info.rt_flag = clk_info->rt_flag;
+
+	/* Override base clock to max or calculate base clk rate */
+	if (!ctx_data->clk_info.rt_flag &&
+		(ctx_data->icp_dev_acquire_info->dev_type !=
+		CAM_ICP_RES_TYPE_BPS))
+		base_clk = ctx_data->clk_info.clk_rate[CAM_MAX_VOTE-1];
+	else
+		base_clk = cam_icp_mgr_calc_base_clk(clk_info->frame_cycles,
+				clk_info->budget_ns);
 
 	if (busy)
 		rc = cam_icp_update_clk_busy(hw_mgr, ctx_data,

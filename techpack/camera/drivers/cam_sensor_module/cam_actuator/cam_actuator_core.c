@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2021, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/module.h>
@@ -106,8 +106,15 @@ static int32_t cam_actuator_power_up(struct cam_actuator_ctrl_t *a_ctrl)
 	}
 
 	rc = camera_io_init(&a_ctrl->io_master_info);
-	if (rc < 0)
+	if (rc < 0) {
 		CAM_ERR(CAM_ACTUATOR, "cci init failed: rc: %d", rc);
+		goto cci_failure;
+	}
+
+	return rc;
+cci_failure:
+	if (cam_sensor_util_power_down(power_info, soc_info))
+		CAM_ERR(CAM_ACTUATOR, "Power down failure");
 
 	return rc;
 }
@@ -367,11 +374,10 @@ static int cam_actuator_update_req_mgr(
 	int rc = 0;
 	struct cam_req_mgr_add_request add_req;
 
+	memset(&add_req, 0, sizeof(add_req));
 	add_req.link_hdl = a_ctrl->bridge_intf.link_hdl;
 	add_req.req_id = csl_packet->header.request_id;
 	add_req.dev_hdl = a_ctrl->bridge_intf.device_hdl;
-	add_req.skip_before_applying = 0;
-	add_req.trigger_eof = false;
 
 	if (a_ctrl->bridge_intf.crm_cb &&
 		a_ctrl->bridge_intf.crm_cb->add_req) {
@@ -794,6 +800,7 @@ void cam_actuator_shutdown(struct cam_actuator_ctrl_t *a_ctrl)
 	power_info->power_down_setting = NULL;
 	power_info->power_setting_size = 0;
 	power_info->power_down_setting_size = 0;
+	a_ctrl->last_flush_req = 0;
 
 	a_ctrl->cam_act_state = CAM_ACTUATOR_INIT;
 }
