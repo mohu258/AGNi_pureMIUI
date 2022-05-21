@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2021, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/module.h>
@@ -23,13 +23,12 @@ static int cam_sensor_update_req_mgr(
 	int rc = 0;
 	struct cam_req_mgr_add_request add_req;
 
+	memset(&add_req, 0, sizeof(add_req));
 	add_req.link_hdl = s_ctrl->bridge_intf.link_hdl;
 	add_req.req_id = csl_packet->header.request_id;
 	CAM_DBG(CAM_SENSOR, " Rxed Req Id: %llu",
 		csl_packet->header.request_id);
 	add_req.dev_hdl = s_ctrl->bridge_intf.device_hdl;
-	add_req.skip_before_applying = 0;
-	add_req.trigger_eof = false;
 	if (s_ctrl->bridge_intf.crm_cb &&
 		s_ctrl->bridge_intf.crm_cb->add_req) {
 		rc = s_ctrl->bridge_intf.crm_cb->add_req(&add_req);
@@ -949,6 +948,7 @@ int32_t cam_sensor_driver_cmd(struct cam_sensor_ctrl_t *s_ctrl,
 		break;
 	}
 	case CAM_START_DEV: {
+		struct cam_req_mgr_timer_notify timer;
 		if ((s_ctrl->sensor_state == CAM_SENSOR_INIT) ||
 			(s_ctrl->sensor_state == CAM_SENSOR_START)) {
 			rc = -EINVAL;
@@ -969,6 +969,21 @@ int32_t cam_sensor_driver_cmd(struct cam_sensor_ctrl_t *s_ctrl,
 			}
 		}
 		s_ctrl->sensor_state = CAM_SENSOR_START;
+
+		if (s_ctrl->bridge_intf.crm_cb &&
+			s_ctrl->bridge_intf.crm_cb->notify_timer) {
+			timer.link_hdl = s_ctrl->bridge_intf.link_hdl;
+			timer.dev_hdl = s_ctrl->bridge_intf.device_hdl;
+			timer.state = true;
+			rc = s_ctrl->bridge_intf.crm_cb->notify_timer(&timer);
+			if (rc) {
+				CAM_ERR(CAM_SENSOR,
+					"Enable CRM SOF freeze timer failed rc: %d",
+					rc);
+				return rc;
+			}
+		}
+
 		CAM_INFO(CAM_SENSOR,
 			"CAM_START_DEV Success, sensor_id:0x%x,sensor_slave_addr:0x%x",
 			s_ctrl->sensordata->slave_info.sensor_id,
@@ -1214,10 +1229,18 @@ int cam_sensor_power_up(struct cam_sensor_ctrl_t *s_ctrl)
 	}
 
 	rc = camera_io_init(&(s_ctrl->io_master_info));
-	if (rc < 0)
+	if (rc < 0) {
 		CAM_ERR(CAM_SENSOR, "cci_init failed: rc: %d", rc);
+		goto cci_failure;
+	}
 
 	return rc;
+cci_failure:
+	if (cam_sensor_util_power_down(power_info, soc_info))
+		CAM_ERR(CAM_SENSOR, "power down failure");
+
+	return rc;
+
 }
 
 #if IS_ENABLED(CONFIG_ISPV2_AL6021)

@@ -953,25 +953,25 @@ static struct cam_camnoc_specific
 			.enable = false,
 		},
 		.qosgen_mainctl = {
-			.enable = false,
+			.enable = true,
 			.access_type = CAM_REG_TYPE_READ_WRITE,
 			.masked_value = 0,
 			.offset = 0x2D08, /* JPEG_QOSGEN_MAINCTL */
-			.value = 0x0,
+			.value = 0x2,
 		},
 		.qosgen_shaping_low = {
-			.enable = false,
+			.enable = true,
 			.access_type = CAM_REG_TYPE_READ_WRITE,
 			.masked_value = 0,
 			.offset = 0x2D20, /* JPEG_QOSGEN_SHAPING_LOW */
-			.value = 0x0,
+			.value = 0x10101010,
 		},
 		.qosgen_shaping_high = {
-			.enable = false,
+			.enable = true,
 			.access_type = CAM_REG_TYPE_READ_WRITE,
 			.masked_value = 0,
 			.offset = 0x2D24, /* JPEG_QOSGEN_SHAPING_HIGH */
-			.value = 0x0,
+			.value = 0x10101010,
 		},
 	},
 	{
@@ -1043,5 +1043,9 @@ static struct cam_camnoc_info cam580_cpas100_camnoc_info = {
 	.errata_wa_list = &cam580_cpas100_errata_wa_list,
 };
 
+static struct cam_cpas_camnoc_qchannel cam580_cpas100_qchannel_info = {
+	.qchannel_ctrl   = 0x5C,
+	.qchannel_status = 0x60,
+};
 #endif /* _CPASTOP_V580_100_H_ */
 

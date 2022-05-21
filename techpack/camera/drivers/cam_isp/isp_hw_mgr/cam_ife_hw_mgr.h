@@ -17,14 +17,11 @@
 
 /* IFE resource constants */
 #define CAM_IFE_HW_IN_RES_MAX            (CAM_ISP_IFE_IN_RES_MAX & 0xFF)
-#define CAM_IFE_HW_OUT_RES_MAX           (CAM_ISP_IFE_OUT_RES_MAX & 0xFF)
 #define CAM_IFE_HW_RES_POOL_MAX          64
 
 /* IFE_HW_MGR custom config */
 #define CAM_IFE_CUSTOM_CFG_FRAME_HEADER_TS   BIT(0)
 #define CAM_IFE_CUSTOM_CFG_SW_SYNC_ON        BIT(1)
-
-#define CAM_IFE_UBWC_COMP_EN                 BIT(1)
 
 /**
  * struct cam_ife_hw_mgr_debug - contain the debug information
@@ -86,6 +83,7 @@ struct cam_ife_hw_mgr_debug {
  *                          context
  * @cdm_done                flag to indicate cdm has finished writing shadow
  *                          registers
+ * @last_cdm_done_req:      Last cdm done request
  * @is_rdi_only_context     flag to specify the context has only rdi resource
  * @config_done_complete    indicator for configuration complete
  * @reg_dump_buf_desc:      cmd buffer descriptors for reg dump
@@ -122,9 +120,7 @@ struct cam_ife_hw_mgr_ctx {
 	struct list_head                res_list_ife_csid;
 	struct list_head                res_list_ife_src;
 	struct list_head                res_list_ife_in_rd;
-	struct cam_isp_hw_mgr_res       res_list_ife_out[
-						CAM_IFE_HW_OUT_RES_MAX];
-
+	struct cam_isp_hw_mgr_res      *res_list_ife_out;
 	struct list_head                free_res_list;
 	struct cam_isp_hw_mgr_res       res_pool[CAM_IFE_HW_RES_POOL_MAX];
 
@@ -141,6 +137,7 @@ struct cam_ife_hw_mgr_ctx {
 	uint32_t                        eof_cnt[CAM_IFE_HW_NUM_MAX];
 	atomic_t                        overflow_pending;
 	atomic_t                        cdm_done;
+	uint64_t                        last_cdm_done_req;
 	uint32_t                        is_rdi_only_context;
 	struct completion               config_done_complete;
 	uint32_t                        hw_version;
@@ -182,6 +179,7 @@ struct cam_ife_hw_mgr_ctx {
  * @ctx_lock               context lock
  * @support_consumed_addr  indicate whether hw supports last consumed address
  * @hw_pid_support         hw pid support for this target
+ * @max_vfe_out_res_type   max ife out res type value from hw
  */
 struct cam_ife_hw_mgr {
 	struct cam_isp_hw_mgr          mgr_common;
@@ -204,6 +202,7 @@ struct cam_ife_hw_mgr {
 	spinlock_t                     ctx_lock;
 	bool                           support_consumed_addr;
 	bool                           hw_pid_support;
+	uint32_t                       max_vfe_out_res_type;
 };
 
 /**
