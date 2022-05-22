@@ -10,6 +10,7 @@
 
 #include "dp_ctrl.h"
 #include "dp_debug.h"
+#include "sde_dbg.h"
 
 #define DP_MST_DEBUG(fmt, ...) DP_DEBUG(fmt, ##__VA_ARGS__)
 
@@ -93,13 +94,11 @@ enum notification_status {
 
 static void dp_ctrl_idle_patterns_sent(struct dp_ctrl_private *ctrl)
 {
-	DP_DEBUG("idle_patterns_sent\n");
 	complete(&ctrl->idle_comp);
 }
 
 static void dp_ctrl_video_ready(struct dp_ctrl_private *ctrl)
 {
-	DP_DEBUG("dp_video_ready\n");
 	complete(&ctrl->video_comp);
 }
 
@@ -185,6 +184,8 @@ static void dp_ctrl_wait4video_ready(struct dp_ctrl_private *ctrl)
 {
 	if (!wait_for_completion_timeout(&ctrl->video_comp, HZ / 2))
 		DP_WARN("SEND_VIDEO time out\n");
+	else
+		DP_DEBUG("SEND_VIDEO triggered\n");
 }
 
 static int dp_ctrl_update_sink_vx_px(struct dp_ctrl_private *ctrl)
@@ -866,6 +867,7 @@ static void dp_ctrl_host_deinit(struct dp_ctrl *dp_ctrl)
 
 static void dp_ctrl_send_video(struct dp_ctrl_private *ctrl)
 {
+	reinit_completion(&ctrl->video_comp);
 	ctrl->catalog->state_ctrl(ctrl->catalog, ST_SEND_VIDEO);
 }
 
@@ -1011,14 +1013,15 @@ static void dp_ctrl_mst_calculate_rg(struct dp_ctrl_private *ctrl,
 	u64 raw_target_sc, target_sc_fixp;
 	u64 ts_denom, ts_enum, ts_int;
 	u64 pclk = panel->pinfo.pixel_clk_khz;
-	u64 lclk = panel->link_info.rate;
-	u64 lanes = panel->link_info.num_lanes;
+	u64 lclk = 0;
+	u64 lanes = ctrl->link->link_params.lane_count;
 	u64 bpp = panel->pinfo.bpp;
 	u64 pbn = panel->pbn;
 	u64 numerator, denominator, temp, temp1, temp2;
 	u32 x_int = 0, y_frac_enum = 0;
 	u64 target_strm_sym, ts_int_fixp, ts_frac_fixp, y_frac_enum_fixp;
 
+	lclk = drm_dp_bw_code_to_link_rate(ctrl->link->link_params.bw_code);
 	if (panel->pinfo.comp_info.comp_ratio > 1)
 		bpp = DSC_BPP(panel->pinfo.comp_info.dsc_info.config);
 
@@ -1156,16 +1159,32 @@ static void dp_ctrl_fec_dsc_setup(struct dp_ctrl_private *ctrl)
 	u8 fec_sts = 0;
 	int rlen;
 	u32 dsc_enable;
+	int i, max_retries = 3;
+	bool fec_en_detected = false;
 
 	if (!ctrl->fec_mode)
 		return;
 
-	ctrl->catalog->fec_config(ctrl->catalog, ctrl->fec_mode);
+	/* Need to try to enable multiple times due to BS symbols collisions */
+	for (i = 0; i < max_retries; i++) {
+		ctrl->catalog->fec_config(ctrl->catalog, ctrl->fec_mode);
 
-	/* wait for controller to start fec sequence */
-	usleep_range(900, 1000);
-	drm_dp_dpcd_readb(ctrl->aux->drm_aux, DP_FEC_STATUS, &fec_sts);
-	DP_DEBUG("sink fec status:%d\n", fec_sts);
+		/* wait for controller to start fec sequence */
+		usleep_range(900, 1000);
+
+		/* read back FEC status and check if it is enabled */
+		drm_dp_dpcd_readb(ctrl->aux->drm_aux, DP_FEC_STATUS, &fec_sts);
+		if (fec_sts & DP_FEC_DECODE_EN_DETECTED) {
+			fec_en_detected = true;
+			break;
+		}
+	}
+
+	SDE_EVT32_EXTERNAL(i, fec_en_detected);
+	DP_DEBUG("retries %d, fec_en_detected %d\n", i, fec_en_detected);
+
+	if (!fec_en_detected)
+		DP_WARN("failed to enable sink fec\n");
 
 	dsc_enable = ctrl->dsc_mode ? 1 : 0;
 	rlen = drm_dp_dpcd_writeb(ctrl->aux->drm_aux, DP_DSC_ENABLE,
@@ -1392,12 +1411,14 @@ static void dp_ctrl_isr(struct dp_ctrl *dp_ctrl)
 {
 	struct dp_ctrl_private *ctrl;
 
+	SDE_EVT32_EXTERNAL(SDE_EVTLOG_FUNC_ENTRY);
 	if (!dp_ctrl)
 		return;
 
 	ctrl = container_of(dp_ctrl, struct dp_ctrl_private, dp_ctrl);
 
 	ctrl->catalog->get_interrupt(ctrl->catalog);
+	SDE_EVT32_EXTERNAL(ctrl->catalog->isr);
 
 	if (ctrl->catalog->isr & DP_CTRL_INTR_READY_FOR_VIDEO)
 		dp_ctrl_video_ready(ctrl);
@@ -1410,6 +1431,7 @@ static void dp_ctrl_isr(struct dp_ctrl *dp_ctrl)
 
 	if (ctrl->catalog->isr5 & DP_CTRL_INTR_MST_DP1_VCPF_SENT)
 		dp_ctrl_idle_patterns_sent(ctrl);
+	SDE_EVT32_EXTERNAL(SDE_EVTLOG_FUNC_EXIT);
 }
 
 void dp_ctrl_set_sim_mode(struct dp_ctrl *dp_ctrl, bool en)

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2021, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/list.h>
@@ -37,6 +37,9 @@
 #define DSI_CLOCK_BITRATE_RADIX 10
 #define MAX_TE_SOURCE_ID  2
 
+#define SEC_PANEL_NAME_MAX_LEN  256
+
+u8 dbgfs_tx_cmd_buf[SZ_4K];
 struct dsi_display *primary_display;
 
 static char dsi_display_primary[MAX_CMDLINE_PARAM_LEN];
@@ -802,6 +805,9 @@ static int dsi_display_status_check_te(struct dsi_display *display,
 	int rc = 1, i = 0;
 	int const esd_te_timeout = msecs_to_jiffies(3*20);
 
+	if (!rechecks)
+		return rc;
+
 	dsi_display_change_te_irq_status(display, true);
 
 	for (i = 0; i < rechecks; i++) {
@@ -860,7 +866,8 @@ int dsi_display_check_status(struct drm_connector *connector, void *display,
 	if (te_check_override)
 		te_rechecks = MAX_TE_RECHECKS;
 
-	if (panel->panel_mode == DSI_OP_VIDEO_MODE)
+	if ((dsi_display->trusted_vm_env) ||
+			(panel->panel_mode == DSI_OP_VIDEO_MODE))
 		te_rechecks = 0;
 
 	ret = dsi_display_clk_ctrl(dsi_display->dsi_clk_handle,
@@ -993,7 +1000,7 @@ static int dsi_display_cmd_rx(struct dsi_display *display,
 	flags |= (DSI_CTRL_CMD_FETCH_MEMORY | DSI_CTRL_CMD_READ);
 	if ((m_ctrl->ctrl->host_config.panel_mode == DSI_OP_VIDEO_MODE) ||
 			((cmd->msg.flags & MIPI_DSI_MSG_CMD_DMA_SCHED) &&
-			 (display->panel->panel_initialized)))
+			 (display->enabled)))
 		flags |= DSI_CTRL_CMD_CUSTOM_DMA_SCHED;
 
 	rc = dsi_ctrl_cmd_transfer(m_ctrl->ctrl, &cmd->msg, &flags);
@@ -1017,10 +1024,9 @@ int dsi_display_cmd_transfer(struct drm_connector *connector,
 		u32 cmd_buf_len)
 {
 	struct dsi_display *dsi_display = display;
-	struct dsi_cmd_desc cmd;
-	u8 cmd_payload[MAX_CMD_PAYLOAD_SIZE];
-	int rc = 0;
-	bool state = false;
+	int rc = 0, cnt = 0, i = 0;
+	bool state = false, transfer = false;
+	struct dsi_panel_cmd_set *set;
 
 	if (!dsi_display || !cmd_buf) {
 		DSI_ERR("[DSI] invalid params\n");
@@ -1029,12 +1035,8 @@ int dsi_display_cmd_transfer(struct drm_connector *connector,
 
 	DSI_DEBUG("[DSI] Display command transfer\n");
 
-	rc = dsi_display_cmd_prepare(cmd_buf, cmd_buf_len,
-			&cmd, cmd_payload, MAX_CMD_PAYLOAD_SIZE);
-	if (rc) {
-		DSI_ERR("[DSI] command prepare failed. rc %d\n", rc);
-		return rc;
-	}
+	if ((cmd_buf[1]) || (cmd_buf[3] & MIPI_DSI_MSG_LASTCOMMAND))
+		transfer = true;
 
 	mutex_lock(&dsi_display->display_lock);
 	rc = dsi_display_ctrl_get_host_init_state(dsi_display, &state);
@@ -1056,8 +1058,59 @@ int dsi_display_cmd_transfer(struct drm_connector *connector,
 		goto end;
 	}
 
-	rc = dsi_display->host.ops->transfer(&dsi_display->host,
-			&cmd.msg);
+	/*
+	 * Reset the dbgfs buffer if the commands sent exceed the available
+	 * buffer size. For video mode, limiting the buffer size to 2K to
+	 * ensure no performance issues.
+	 */
+	if (dsi_display->panel->panel_mode == DSI_OP_CMD_MODE) {
+		if ((dsi_display->tx_cmd_buf_ndx + cmd_buf_len) > SZ_4K) {
+			memset(dbgfs_tx_cmd_buf, 0, SZ_4K);
+			dsi_display->tx_cmd_buf_ndx = 0;
+		}
+	} else {
+		if ((dsi_display->tx_cmd_buf_ndx + cmd_buf_len) > SZ_2K) {
+			memset(dbgfs_tx_cmd_buf, 0, SZ_4K);
+			dsi_display->tx_cmd_buf_ndx = 0;
+		}
+	}
+
+	memcpy(&dbgfs_tx_cmd_buf[dsi_display->tx_cmd_buf_ndx], cmd_buf,
+			cmd_buf_len);
+	dsi_display->tx_cmd_buf_ndx += cmd_buf_len;
+	if (transfer) {
+		struct dsi_cmd_desc *cmds;
+
+		set = &dsi_display->cmd_set;
+		set->count = 0;
+		dsi_panel_get_cmd_pkt_count(dbgfs_tx_cmd_buf,
+				dsi_display->tx_cmd_buf_ndx, &cnt);
+		dsi_panel_alloc_cmd_packets(set, cnt);
+		dsi_panel_create_cmd_packets(dbgfs_tx_cmd_buf,
+				dsi_display->tx_cmd_buf_ndx, cnt, set->cmds);
+		cmds = set->cmds;
+		dsi_display->tx_cmd_buf_ndx = 0;
+
+		for (i = 0; i < cnt; i++) {
+			if (cmds->last_command)
+				cmds->msg.flags |= MIPI_DSI_MSG_LASTCOMMAND;
+			rc = dsi_display->host.ops->transfer(&dsi_display->host,
+					&cmds->msg);
+			if (rc < 0) {
+				DSI_ERR("failed to send command, rc=%d\n", rc);
+				break;
+			}
+			if (cmds->post_wait_ms)
+				usleep_range(cmds->post_wait_ms*1000,
+						((cmds->post_wait_ms*1000)+10));
+			cmds++;
+		}
+
+		memset(dbgfs_tx_cmd_buf, 0, SZ_4K);
+		dsi_panel_destroy_cmd_packets(set);
+		dsi_panel_dealloc_cmd_packets(set);
+	}
+
 end:
 	mutex_unlock(&dsi_display->display_lock);
 	return rc;
@@ -1074,7 +1127,19 @@ static void _dsi_display_continuous_clk_ctrl(struct dsi_display *display,
 
 	display_for_each_ctrl(i, display) {
 		ctrl = &display->ctrl[i];
-		dsi_ctrl_set_continuous_clk(ctrl->ctrl, enable);
+
+		/*
+		 * For phy ver 4.0 chipsets, configure DSI controller and
+		 * DSI PHY to force clk lane to HS mode always whereas
+		 * for other phy ver chipsets, configure DSI controller only.
+		 */
+		if (ctrl->phy->hw.ops.set_continuous_clk) {
+			dsi_ctrl_hs_req_sel(ctrl->ctrl, true);
+			dsi_ctrl_set_continuous_clk(ctrl->ctrl, enable);
+			dsi_phy_set_continuous_clk(ctrl->phy, enable);
+		} else {
+			dsi_ctrl_set_continuous_clk(ctrl->ctrl, enable);
+		}
 	}
 }
 
@@ -1334,6 +1399,14 @@ static ssize_t debugfs_misr_setup(struct file *file,
 	display->misr_frame_count = frame_count;
 
 	mutex_lock(&display->display_lock);
+
+	if (!display->hw_ownership) {
+		DSI_DEBUG("[%s] op not supported due to HW unavailability\n",
+				display->name);
+		rc = -EOPNOTSUPP;
+		goto unlock;
+	}
+
 	rc = dsi_display_clk_ctrl(display->dsi_clk_handle,
 			DSI_CORE_CLK, DSI_CLK_ON);
 	if (rc) {
@@ -1385,6 +1458,14 @@ static ssize_t debugfs_misr_read(struct file *file,
 		return -ENOMEM;
 
 	mutex_lock(&display->display_lock);
+
+	if (!display->hw_ownership) {
+		DSI_DEBUG("[%s] op not supported due to HW unavailability\n",
+				display->name);
+		rc = -EOPNOTSUPP;
+		goto error;
+	}
+
 	rc = dsi_display_clk_ctrl(display->dsi_clk_handle,
 			DSI_CORE_CLK, DSI_CLK_ON);
 	if (rc) {
@@ -1482,9 +1563,19 @@ static ssize_t debugfs_esd_trigger_check(struct file *file,
 
 	display->esd_trigger = esd_trigger;
 
+	mutex_lock(&display->display_lock);
+
+	if (!display->hw_ownership) {
+		DSI_DEBUG("[%s] op not supported due to HW unavailability\n",
+				display->name);
+		rc = -EOPNOTSUPP;
+		goto unlock;
+	}
+
 	if (display->esd_trigger) {
 		DSI_INFO("ESD attack triggered by user\n");
-		rc = dsi_panel_trigger_esd_attack(display->panel);
+		rc = dsi_panel_trigger_esd_attack(display->panel,
+						display->trusted_vm_env);
 		if (rc) {
 			DSI_ERR("Failed to trigger ESD attack\n");
 			goto error;
@@ -1492,6 +1583,8 @@ static ssize_t debugfs_esd_trigger_check(struct file *file,
 	}
 
 	rc = len;
+unlock:
+	mutex_unlock(&display->display_lock);
 error:
 	kfree(buf);
 	return rc;
@@ -1537,12 +1630,15 @@ static ssize_t debugfs_alter_esd_check_mode(struct file *file,
 		goto error;
 	}
 
-	if (!esd_config->esd_enabled)
+	if (!esd_config->esd_enabled) {
+		rc = -EINVAL;
 		goto error;
+	}
 
 	if (!strcmp(buf, "te_signal_check\n")) {
 		if (display->panel->panel_mode == DSI_OP_VIDEO_MODE) {
 			DSI_INFO("TE based ESD check for Video Mode panels is not allowed\n");
+			rc = -EINVAL;
 			goto error;
 		}
 		DSI_INFO("ESD check is switched to TE mode by user\n");
@@ -1785,9 +1881,15 @@ static int dsi_display_debugfs_init(struct dsi_display *display)
 	int rc = 0;
 	struct dentry *dir, *dump_file, *misr_data;
 	char name[MAX_NAME_SIZE];
+	char panel_name[SEC_PANEL_NAME_MAX_LEN];
+	char secondary_panel_str[] = "_secondary";
 	int i;
 
-	dir = debugfs_create_dir(display->name, NULL);
+	strlcpy(panel_name, display->name, SEC_PANEL_NAME_MAX_LEN);
+	if (strcmp(display->display_type, "secondary") == 0)
+		strlcat(panel_name, secondary_panel_str, SEC_PANEL_NAME_MAX_LEN);
+
+	dir = debugfs_create_dir(panel_name, NULL);
 	if (IS_ERR_OR_NULL(dir)) {
 		rc = PTR_ERR(dir);
 		DSI_ERR("[%s] debugfs create dir failed, rc = %d\n",
@@ -2488,7 +2590,7 @@ static int dsi_display_parse_boot_display_selection(void)
 		strlcpy(disp_buf, boot_displays[i].boot_param,
 			MAX_CMDLINE_PARAM_LEN);
 
-		pos = strnstr(disp_buf, ":", MAX_CMDLINE_PARAM_LEN);
+		pos = strnstr(disp_buf, ":", strlen(disp_buf));
 
 		/* Use ':' as a delimiter to retrieve the display name */
 		if (!pos) {
@@ -3025,8 +3127,12 @@ static int dsi_display_broadcast_cmd(struct dsi_display *display,
 		m_flags |= DSI_CTRL_CMD_LAST_COMMAND;
 	}
 
-	if ((msg->flags & MIPI_DSI_MSG_CMD_DMA_SCHED) &&
-				(display->panel->panel_initialized)) {
+	/*
+	 * During broadcast command dma scheduling is always recommended.
+	 * As long as the display is enabled and TE is running the
+	 * DSI_CTRL_CMD_CUSTOM_DMA_SCHED flag should be set.
+	 */
+	if (display->enabled) {
 		flags |= DSI_CTRL_CMD_CUSTOM_DMA_SCHED;
 		m_flags |= DSI_CTRL_CMD_CUSTOM_DMA_SCHED;
 	}
@@ -3202,7 +3308,7 @@ static ssize_t dsi_host_transfer(struct mipi_dsi_host *host,
 			cmd_flags |= DSI_CTRL_CMD_ASYNC_WAIT;
 
 		if ((msg->flags & MIPI_DSI_MSG_CMD_DMA_SCHED) &&
-				(display->panel->panel_initialized))
+				(display->enabled))
 			cmd_flags |= DSI_CTRL_CMD_CUSTOM_DMA_SCHED;
 
 		rc = dsi_ctrl_cmd_transfer(display->ctrl[ctrl_idx].ctrl, msg,
@@ -4096,10 +4202,13 @@ static int dsi_display_res_init(struct dsi_display *display)
 	 * In trusted vm, the connectors will not be enabled
 	 * until the HW resources are assigned and accepted.
 	 */
-	if (display->trusted_vm_env)
+	if (display->trusted_vm_env) {
 		display->is_active = false;
-	else
+		display->hw_ownership = false;
+	} else {
 		display->is_active = true;
+		display->hw_ownership = true;
+	}
 
 	return 0;
 error_ctrl_put:
@@ -4532,7 +4641,6 @@ static int _dsi_display_dyn_update_clks(struct dsi_display *display,
 		dsi_phy_dynamic_refresh_clear(ctrl->phy);
 	}
 
-defer_dfps_wait:
 	rc = dsi_clk_update_parent(enable_clk,
 			&display->clock_info.mux_clks);
 	if (rc)
@@ -4564,7 +4672,20 @@ recover_byte_clk:
 exit:
 	dsi_clk_disable_unprepare(&display->clock_info.src_clks);
 
+defer_dfps_wait:
 	return rc;
+}
+
+void dsi_display_dfps_update_parent(struct dsi_display *display)
+{
+	int rc = 0;
+
+	rc = dsi_clk_update_parent(&display->clock_info.src_clks,
+			      &display->clock_info.mux_clks);
+	if (rc)
+		DSI_ERR("could not switch back to src clks %d\n", rc);
+
+	dsi_clk_disable_unprepare(&display->clock_info.src_clks);
 }
 
 static int dsi_display_dynamic_clk_switch_vid(struct dsi_display *display,
@@ -5095,7 +5216,7 @@ static int _dsi_display_dev_init(struct dsi_display *display)
 		return -EINVAL;
 	}
 
-	if (!display->panel_node)
+	if (!display->panel_node && !display->fw)
 		return 0;
 
 	mutex_lock(&display->display_lock);
@@ -5342,18 +5463,32 @@ end:
 
 static int dsi_display_pre_release(void *data)
 {
+	struct dsi_display *display;
+
 	if (!data)
 		return -EINVAL;
 
-	dsi_display_ctrl_irq_update((struct dsi_display *)data, false);
+	display = (struct dsi_display *)data;
+	mutex_lock(&display->display_lock);
+	display->hw_ownership = false;
+	mutex_unlock(&display->display_lock);
+
+	dsi_display_ctrl_irq_update(display, false);
 
 	return 0;
 }
 
 static int dsi_display_pre_acquire(void *data)
 {
+	struct dsi_display *display;
+
 	if (!data)
 		return -EINVAL;
+
+	display = (struct dsi_display *)data;
+	mutex_lock(&display->display_lock);
+	display->hw_ownership = true;
+	mutex_unlock(&display->display_lock);
 
 	dsi_display_ctrl_irq_update((struct dsi_display *)data, true);
 
@@ -5400,7 +5535,7 @@ static int dsi_display_bind(struct device *dev,
 				drm, display);
 		return -EINVAL;
 	}
-	if (!display->panel_node)
+	if (!display->panel_node && !display->fw)
 		return 0;
 
 	if (!display->fw)
@@ -5582,6 +5717,8 @@ error_ctrl_deinit:
 		display_ctrl = &display->ctrl[i];
 		(void)dsi_phy_drv_deinit(display_ctrl->phy);
 		(void)dsi_ctrl_drv_deinit(display_ctrl->ctrl);
+		dsi_ctrl_put(display_ctrl->ctrl);
+		dsi_phy_put(display_ctrl->phy);
 	}
 	(void)dsi_display_debugfs_deinit(display);
 error:
@@ -5710,7 +5847,13 @@ static void dsi_display_firmware_display(const struct firmware *fw,
 			fw->size);
 
 		display->fw = fw;
-		display->name = "dsi_firmware_display";
+
+		if (!strcmp(display->display_type, "primary"))
+			display->name = "dsi_firmware_display";
+
+		else if (!strcmp(display->display_type, "secondary"))
+			display->name = "dsi_firmware_display_secondary";
+
 	} else {
 		DSI_INFO("no firmware available, fallback to device node\n");
 	}
@@ -5811,13 +5954,21 @@ int dsi_display_dev_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, display);
 
 	/* initialize display in firmware callback */
-	if (!boot_disp->boot_disp_en &&
+	if (!(boot_displays[DSI_PRIMARY].boot_disp_en ||
+			boot_displays[DSI_SECONDARY].boot_disp_en) &&
 			IS_ENABLED(CONFIG_DSI_PARSER) &&
 			!display->trusted_vm_env) {
-		firm_req = !request_firmware_nowait(
-			THIS_MODULE, 1, "dsi_prop",
-			&pdev->dev, GFP_KERNEL, display,
-			dsi_display_firmware_display);
+		if (!strcmp(display->display_type, "primary"))
+			firm_req = !request_firmware_nowait(
+				THIS_MODULE, 1, "dsi_prop",
+				&pdev->dev, GFP_KERNEL, display,
+				dsi_display_firmware_display);
+
+		else if (!strcmp(display->display_type, "secondary"))
+			firm_req = !request_firmware_nowait(
+				THIS_MODULE, 1, "dsi_prop_sec",
+				&pdev->dev, GFP_KERNEL, display,
+				dsi_display_firmware_display);
 	}
 
 	if (!firm_req) {
@@ -5878,7 +6029,8 @@ int dsi_display_get_num_of_displays(void)
 	for (i = 0; i < MAX_DSI_ACTIVE_DISPLAY; i++) {
 		struct dsi_display *display = boot_displays[i].disp;
 
-		if (display && display->panel_node)
+		if ((display && display->panel_node) ||
+					(display && display->fw))
 			count++;
 	}
 
@@ -5897,7 +6049,8 @@ int dsi_display_get_active_displays(void **display_array, u32 max_display_count)
 	for (index = 0; index < MAX_DSI_ACTIVE_DISPLAY; index++) {
 		struct dsi_display *display = boot_displays[index].disp;
 
-		if (display && display->panel_node)
+		if ((display && display->panel_node) ||
+					(display && display->fw))
 			display_array[count++] = display;
 	}
 
@@ -6465,7 +6618,10 @@ int dsi_display_get_info(struct drm_connector *connector,
 	info->max_width = 1920;
 	info->max_height = 1080;
 	info->qsync_min_fps =
-		display->panel->qsync_min_fps;
+		display->panel->qsync_caps.qsync_min_fps;
+	info->has_qsync_min_fps_list =
+		(display->panel->qsync_caps.qsync_min_fps_list_len > 0) ?
+		true : false;
 	info->poms_align_vsync = display->panel->poms_align_vsync;
 
 	switch (display->panel->panel_mode) {
@@ -6925,6 +7081,25 @@ int dsi_display_get_default_lms(void *dsi_display, u32 *num_lm)
 	mutex_unlock(&display->display_lock);
 
 	return rc;
+}
+
+int dsi_display_get_qsync_min_fps(void *display_dsi, u32 mode_fps)
+{
+	struct dsi_display *display = (struct dsi_display *)display_dsi;
+	struct dsi_panel *panel;
+	u32 i;
+
+	if (display == NULL || display->panel == NULL)
+		return -EINVAL;
+
+	panel = display->panel;
+	for (i = 0; i < panel->dfps_caps.dfps_list_len; i++) {
+		if (panel->dfps_caps.dfps_list[i] == mode_fps)
+			return panel->qsync_caps.qsync_min_fps_list[i];
+	}
+	SDE_EVT32(mode_fps);
+	DSI_DEBUG("Invalid mode_fps %d\n", mode_fps);
+	return -EINVAL;
 }
 
 int dsi_display_find_mode(struct dsi_display *display,
@@ -7566,6 +7741,7 @@ int dsi_display_prepare(struct dsi_display *display)
 	SDE_EVT32(SDE_EVTLOG_FUNC_ENTRY);
 	mutex_lock(&display->display_lock);
 
+	display->hw_ownership = true;
 	mode = display->panel->cur_mode;
 
 	dsi_display_set_ctrl_esd_check_flag(display, false);
@@ -7774,7 +7950,7 @@ static int dsi_display_qsync(struct dsi_display *display, bool enable)
 	int i;
 	int rc = 0;
 
-	if (!display->panel->qsync_min_fps) {
+	if (!display->panel->qsync_caps.qsync_min_fps) {
 		DSI_ERR("%s:ERROR: qsync set, but no fps\n", __func__);
 		return 0;
 	}
@@ -7802,7 +7978,7 @@ static int dsi_display_qsync(struct dsi_display *display, bool enable)
 	}
 
 exit:
-	SDE_EVT32(enable, display->panel->qsync_min_fps, rc);
+	SDE_EVT32(enable, display->panel->qsync_caps.qsync_min_fps, rc);
 	mutex_unlock(&display->display_lock);
 	return rc;
 }
@@ -8423,6 +8599,7 @@ int dsi_display_unprepare(struct dsi_display *display)
 			DSI_ERR("[%s] panel post-unprepare failed, rc=%d\n",
 			       display->name, rc);
 	}
+	display->hw_ownership = false;
 
 	mutex_unlock(&display->display_lock);
 

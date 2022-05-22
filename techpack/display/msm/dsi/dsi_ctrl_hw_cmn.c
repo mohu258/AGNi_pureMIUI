@@ -845,7 +845,6 @@ void dsi_ctrl_hw_cmn_reset_cmd_fifo(struct dsi_ctrl_hw *ctrl)
 void dsi_ctrl_hw_cmn_trigger_command_dma(struct dsi_ctrl_hw *ctrl)
 {
 	DSI_W32(ctrl, DSI_CMD_MODE_DMA_SW_TRIGGER, 0x1);
-	DSI_CTRL_HW_DBG(ctrl, "CMD DMA triggered\n");
 }
 
 /**
@@ -936,6 +935,33 @@ u32 dsi_ctrl_hw_cmn_get_cmd_read_data(struct dsi_ctrl_hw *ctrl,
 	*hw_read_cnt = read_cnt;
 	DSI_CTRL_HW_DBG(ctrl, "Read %d bytes\n", rx_byte);
 	return rx_byte;
+}
+
+/**
+ * poll_slave_dma_status() - API to clear poll DMA status
+ * @ctrl:          Pointer to the controller host hardware.
+ *
+ * Return: DMA status.
+ */
+u32 dsi_ctrl_hw_cmn_poll_slave_dma_status(struct dsi_ctrl_hw *ctrl)
+{
+	int rc = 0;
+	u32 status;
+	u32 const delay_us = 10;
+	u32 const timeout_us = 5000;
+
+	rc = readl_poll_timeout_atomic(ctrl->base + DSI_INT_CTRL,
+				      status,
+				      ((status & DSI_CMD_MODE_DMA_DONE)
+					> 0),
+				      delay_us,
+				      timeout_us);
+	if (rc) {
+		DSI_CTRL_HW_DBG(ctrl, "DSI1 CMD_MODE_DMA_DONE failed\n");
+		status = 0;
+	}
+
+	return status;
 }
 
 /**
@@ -1686,4 +1712,19 @@ int dsi_ctrl_hw_cmn_wait4dynamic_refresh_done(struct dsi_ctrl_hw *ctrl)
 	DSI_W32(ctrl, DSI_INT_CTRL, reg);
 
 	return 0;
+}
+
+bool dsi_ctrl_hw_cmn_vid_engine_busy(struct dsi_ctrl_hw *ctrl)
+{
+	u32 reg = 0, video_engine_busy = BIT(3);
+	int rc;
+	u32 const sleep_us = 1000;
+	u32 const timeout_us = 50000;
+
+	rc = readl_poll_timeout(ctrl->base + DSI_STATUS, reg,
+			!(reg & video_engine_busy), sleep_us, timeout_us);
+	if (rc)
+		return true;
+
+	return false;
 }

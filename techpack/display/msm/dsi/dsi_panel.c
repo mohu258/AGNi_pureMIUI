@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2021, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/delay.h>
@@ -192,29 +192,52 @@ static int dsi_panel_gpio_release(struct dsi_panel *panel)
 	return rc;
 }
 
-int dsi_panel_trigger_esd_attack(struct dsi_panel *panel)
+int dsi_panel_trigger_esd_attack(struct dsi_panel *panel, bool trusted_vm_env)
 {
-	struct dsi_panel_reset_config *r_config;
-
 	if (!panel) {
 		DSI_ERR("Invalid panel param\n");
 		return -EINVAL;
 	}
 
-	r_config = &panel->reset_config;
-	if (!r_config) {
-		DSI_ERR("Invalid panel reset configuration\n");
-		return -EINVAL;
+	/* toggle reset-gpio by writing directly to register in trusted-vm */
+	if (trusted_vm_env) {
+		struct dsi_tlmm_gpio *gpio = NULL;
+		void __iomem *io;
+		u32 offset = 0x4;
+		int i;
+
+		for (i = 0; i < panel->tlmm_gpio_count; i++)
+			if (!strcmp(panel->tlmm_gpio[i].name, "reset-gpio"))
+				gpio = &panel->tlmm_gpio[i];
+
+		if (!gpio) {
+			DSI_ERR("reset gpio not found\n");
+			return -EINVAL;
+		}
+
+		io = ioremap(gpio->addr, gpio->size);
+		writel_relaxed(0, io + offset);
+		iounmap(io);
+
+	} else {
+		struct dsi_panel_reset_config *r_config = &panel->reset_config;
+
+		if (!r_config) {
+			DSI_ERR("Invalid panel reset configuration\n");
+			return -EINVAL;
+		}
+
+		if (!gpio_is_valid(r_config->reset_gpio)) {
+			DSI_ERR("failed to pull down gpio\n");
+			return -EINVAL;
+		}
+		gpio_set_value(r_config->reset_gpio, 0);
 	}
 
-	if (gpio_is_valid(r_config->reset_gpio)) {
-		gpio_set_value(r_config->reset_gpio, 0);
-		SDE_EVT32(SDE_EVTLOG_FUNC_CASE1);
-		DSI_INFO("GPIO pulled low to simulate ESD\n");
-		return 0;
-	}
-	DSI_ERR("failed to pull down gpio\n");
-	return -EINVAL;
+	SDE_EVT32(SDE_EVTLOG_FUNC_CASE1);
+	DSI_INFO("GPIO pulled low to simulate ESD\n");
+
+	return 0;
 }
 
 static int dsi_panel_reset(struct dsi_panel *panel)
@@ -1417,8 +1440,15 @@ static int dsi_panel_parse_qsync_caps(struct dsi_panel *panel,
 				     struct device_node *of_node)
 {
 	int rc = 0;
-	u32 val = 0;
+	u32 val = 0, i;
+	struct dsi_qsync_capabilities *qsync_caps = &panel->qsync_caps;
+	struct dsi_parser_utils *utils = &panel->utils;
+	const char *name = panel->name;
 
+	/**
+	 * "mdss-dsi-qsync-min-refresh-rate" is defined in cmd mode and
+	 *  video mode when there is only one qsync min fps present.
+	 */
 	rc = of_property_read_u32(of_node,
 				  "qcom,mdss-dsi-qsync-min-refresh-rate",
 				  &val);
@@ -1426,8 +1456,75 @@ static int dsi_panel_parse_qsync_caps(struct dsi_panel *panel,
 		DSI_DEBUG("[%s] qsync min fps not defined rc:%d\n",
 			panel->name, rc);
 
-	panel->qsync_min_fps = val;
+	qsync_caps->qsync_min_fps = val;
 
+	/**
+	 * "dsi-supported-qsync-min-fps-list" may be defined in video
+	 *  mode, only in dfps case when "qcom,dsi-supported-dfps-list"
+	 *  is defined.
+	 */
+	qsync_caps->qsync_min_fps_list_len = utils->count_u32_elems(utils->data,
+				  "qcom,dsi-supported-qsync-min-fps-list");
+	if (qsync_caps->qsync_min_fps_list_len < 1)
+		goto qsync_support;
+
+	/**
+	 * qcom,dsi-supported-qsync-min-fps-list cannot be defined
+	 *  along with qcom,mdss-dsi-qsync-min-refresh-rate.
+	 */
+	if (qsync_caps->qsync_min_fps_list_len >= 1 &&
+		qsync_caps->qsync_min_fps) {
+		DSI_ERR("[%s] Both qsync nodes are defined\n",
+				name);
+		rc = -EINVAL;
+		goto error;
+	}
+
+	if (panel->dfps_caps.dfps_list_len !=
+			qsync_caps->qsync_min_fps_list_len) {
+		DSI_ERR("[%s] Qsync min fps list mismatch with dfps\n", name);
+		rc = -EINVAL;
+		goto error;
+	}
+
+	qsync_caps->qsync_min_fps_list =
+		kcalloc(qsync_caps->qsync_min_fps_list_len, sizeof(u32),
+			GFP_KERNEL);
+	if (!qsync_caps->qsync_min_fps_list) {
+		rc = -ENOMEM;
+		goto error;
+	}
+
+	rc = utils->read_u32_array(utils->data,
+			"qcom,dsi-supported-qsync-min-fps-list",
+			qsync_caps->qsync_min_fps_list,
+			qsync_caps->qsync_min_fps_list_len);
+	if (rc) {
+		DSI_ERR("[%s] Qsync min fps list parse failed\n", name);
+		rc = -EINVAL;
+		goto error;
+	}
+
+	qsync_caps->qsync_min_fps = qsync_caps->qsync_min_fps_list[0];
+
+	for (i = 1; i < qsync_caps->qsync_min_fps_list_len; i++) {
+		if (qsync_caps->qsync_min_fps_list[i] <
+				qsync_caps->qsync_min_fps)
+			qsync_caps->qsync_min_fps =
+				qsync_caps->qsync_min_fps_list[i];
+	}
+
+qsync_support:
+	/* allow qsync support only if DFPS is with VFP approach */
+	if ((panel->dfps_caps.dfps_support) &&
+	    !(panel->dfps_caps.type == DSI_DFPS_IMMEDIATE_VFP))
+		panel->qsync_caps.qsync_min_fps = 0;
+
+error:
+	if (rc < 0) {
+		qsync_caps->qsync_min_fps = 0;
+		qsync_caps->qsync_min_fps_list_len = 0;
+	}
 	return rc;
 }
 
@@ -1866,7 +1963,7 @@ const char *cmd_set_state_map[DSI_CMD_SET_MAX] = {
 	"mi,mdss-dsi-local-hbm-off-to-hlpm-command-state",
 };
 
-static int dsi_panel_get_cmd_pkt_count(const char *data, u32 length, u32 *cnt)
+int dsi_panel_get_cmd_pkt_count(const char *data, u32 length, u32 *cnt)
 {
 	const u32 cmd_set_min_size = 7;
 	u32 count = 0;
@@ -1890,7 +1987,7 @@ static int dsi_panel_get_cmd_pkt_count(const char *data, u32 length, u32 *cnt)
 	return 0;
 }
 
-static int dsi_panel_create_cmd_packets(const char *data,
+int dsi_panel_create_cmd_packets(const char *data,
 					u32 length,
 					u32 count,
 					struct dsi_cmd_desc *cmd)
@@ -1935,7 +2032,7 @@ error_free_payloads:
 	return rc;
 }
 
-static void dsi_panel_destroy_cmd_packets(struct dsi_panel_cmd_set *set)
+void dsi_panel_destroy_cmd_packets(struct dsi_panel_cmd_set *set)
 {
 	u32 i = 0;
 	struct dsi_cmd_desc *cmd;
@@ -1946,12 +2043,12 @@ static void dsi_panel_destroy_cmd_packets(struct dsi_panel_cmd_set *set)
 	}
 }
 
-static void dsi_panel_dealloc_cmd_packets(struct dsi_panel_cmd_set *set)
+void dsi_panel_dealloc_cmd_packets(struct dsi_panel_cmd_set *set)
 {
 	kfree(set->cmds);
 }
 
-static int dsi_panel_alloc_cmd_packets(struct dsi_panel_cmd_set *cmd,
+int dsi_panel_alloc_cmd_packets(struct dsi_panel_cmd_set *cmd,
 					u32 packet_count)
 {
 	u32 size;
@@ -2266,63 +2363,19 @@ int dsi_panel_get_io_resources(struct dsi_panel *panel,
 	struct list_head temp_head;
 	struct msm_io_mem_entry *io_mem, *pos, *tmp;
 	struct list_head *mem_list = &io_res->mem;
-	int i, rc = 0, address_count, pin_count;
-	u32 *pins = NULL, *address = NULL;
-	u32 base, size;
-	struct dsi_parser_utils *utils = &panel->utils;
+	int i, rc = 0;
 
 	INIT_LIST_HEAD(&temp_head);
 
-	address_count = utils->count_u32_elems(utils->data,
-				"qcom,dsi-panel-gpio-address");
-	if (address_count != 2) {
-		DSI_DEBUG("panel gpio address not defined\n");
-		return 0;
-	}
-
-	address =  kzalloc(sizeof(u32) * address_count, GFP_KERNEL);
-	if (!address)
-		return -ENOMEM;
-
-	rc = utils->read_u32_array(utils->data, "qcom,dsi-panel-gpio-address",
-				address, address_count);
-	if (rc) {
-		DSI_ERR("panel gpio address not defined correctly\n");
-		goto end;
-	}
-	base = address[0];
-	size = address[1];
-
-	pin_count = utils->count_u32_elems(utils->data,
-				"qcom,dsi-panel-gpio-pins");
-	if (pin_count < 0) {
-		DSI_ERR("panel gpio pins not defined\n");
-		rc = pin_count;
-		goto end;
-	}
-
-	pins =  kzalloc(sizeof(u32) * pin_count, GFP_KERNEL);
-	if (!pins) {
-		rc = -ENOMEM;
-		goto end;
-	}
-
-	rc = utils->read_u32_array(utils->data, "qcom,dsi-panel-gpio-pins",
-				pins, pin_count);
-	if (rc) {
-		DSI_ERR("panel gpio pins not defined correctly\n");
-		goto end;
-	}
-
-	for (i = 0; i < pin_count; i++) {
+	for (i = 0; i < panel->tlmm_gpio_count; i++) {
 		io_mem = kzalloc(sizeof(*io_mem), GFP_KERNEL);
 		if (!io_mem) {
 			rc = -ENOMEM;
 			goto parse_fail;
 		}
 
-		io_mem->base = base + (pins[i] * size);
-		io_mem->size = size;
+		io_mem->base = panel->tlmm_gpio[i].addr;
+		io_mem->size = panel->tlmm_gpio[i].size;
 
 		list_add(&io_mem->list, &temp_head);
 	}
@@ -2336,8 +2389,6 @@ parse_fail:
 		kzfree(pos);
 	}
 end:
-	kzfree(pins);
-	kzfree(address);
 	return rc;
 }
 
@@ -2424,6 +2475,54 @@ static int dsi_panel_parse_gpios(struct dsi_panel *panel)
 
 error:
 	return rc;
+}
+
+static int dsi_panel_parse_tlmm_gpio(struct dsi_panel *panel)
+{
+	struct dsi_parser_utils *utils = &panel->utils;
+	u32 base, size, pin;
+	int pin_count, address_count, name_count, i;
+
+	address_count = of_property_count_u32_elems(utils->data,
+				"qcom,dsi-panel-gpio-address");
+	if (address_count != 2) {
+		DSI_DEBUG("panel gpio address not defined\n");
+		return 0;
+	}
+
+	of_property_read_u32_index(utils->data,
+			"qcom,dsi-panel-gpio-address", 0, &base);
+	of_property_read_u32_index(utils->data,
+			"qcom,dsi-panel-gpio-address", 1, &size);
+
+	pin_count = of_property_count_u32_elems(utils->data,
+				"qcom,dsi-panel-gpio-pins");
+	name_count = of_property_count_strings(utils->data,
+				"qcom,dsi-panel-gpio-names");
+	if ((pin_count < 0) || (name_count < 0) || (pin_count != name_count)) {
+		DSI_ERR("invalid gpio pins/names\n");
+		return -EINVAL;
+	}
+
+	panel->tlmm_gpio = kcalloc(pin_count,
+				sizeof(struct dsi_tlmm_gpio), GFP_KERNEL);
+	if (!panel->tlmm_gpio)
+		return -ENOMEM;
+
+	panel->tlmm_gpio_count = pin_count;
+	for (i = 0; i < pin_count; i++) {
+		of_property_read_u32_index(utils->data,
+				"qcom,dsi-panel-gpio-pins", i, &pin);
+		panel->tlmm_gpio[i].num = pin;
+		panel->tlmm_gpio[i].addr = base + (pin * size);
+		panel->tlmm_gpio[i].size = size;
+
+		of_property_read_string_index(utils->data,
+				"qcom,dsi-panel-gpio-names", i,
+				&(panel->tlmm_gpio[i].name));
+	}
+
+	return 0;
 }
 
 static int dsi_panel_parse_bl_pwm_config(struct dsi_panel *panel)
@@ -3552,6 +3651,7 @@ static void dsi_panel_setup_vm_ops(struct dsi_panel *panel, bool trusted_vm_env)
 		panel->panel_ops.bl_register = dsi_panel_vm_stub;
 		panel->panel_ops.bl_unregister = dsi_panel_vm_stub;
 		panel->panel_ops.parse_gpios = dsi_panel_vm_stub;
+		panel->panel_ops.parse_power_cfg = dsi_panel_vm_stub;
 	} else {
 		panel->panel_ops.pinctrl_init = dsi_panel_pinctrl_init;
 		panel->panel_ops.gpio_request = dsi_panel_gpio_request;
@@ -3560,6 +3660,7 @@ static void dsi_panel_setup_vm_ops(struct dsi_panel *panel, bool trusted_vm_env)
 		panel->panel_ops.bl_register = dsi_panel_bl_register;
 		panel->panel_ops.bl_unregister = dsi_panel_bl_unregister;
 		panel->panel_ops.parse_gpios = dsi_panel_parse_gpios;
+		panel->panel_ops.parse_power_cfg = dsi_panel_parse_power_cfg;
 	}
 }
 
@@ -3721,11 +3822,6 @@ struct dsi_panel *dsi_panel_get(struct device *parent,
 	if (rc)
 		DSI_DEBUG("failed to parse qsync features, rc=%d\n", rc);
 
-	/* allow qsync support only if DFPS is with VFP approach */
-	if ((panel->dfps_caps.dfps_support) &&
-	    !(panel->dfps_caps.type == DSI_DFPS_IMMEDIATE_VFP))
-		panel->qsync_min_fps = 0;
-
 	rc = dsi_panel_parse_dyn_clk_caps(panel);
 	if (rc)
 		DSI_ERR("failed to parse dynamic clk config, rc=%d\n", rc);
@@ -3743,7 +3839,13 @@ struct dsi_panel *dsi_panel_get(struct device *parent,
 		goto error;
 	}
 
-	rc = dsi_panel_parse_power_cfg(panel);
+	rc = dsi_panel_parse_tlmm_gpio(panel);
+	if (rc) {
+		DSI_ERR("failed to parse panel tlmm gpios, rc=%d\n", rc);
+		goto error;
+	}
+
+	rc = panel->panel_ops.parse_power_cfg(panel);
 	if (rc)
 		DSI_ERR("failed to parse power config, rc=%d\n", rc);
 
@@ -3916,6 +4018,7 @@ int dsi_panel_drv_deinit(struct dsi_panel *panel)
 	if (rc)
 		DSI_ERR("[%s] failed to put regs, rc=%d\n", panel->name, rc);
 
+	kfree(panel->tlmm_gpio);
 	panel->host = NULL;
 	memset(&panel->mipi_device, 0x0, sizeof(panel->mipi_device));
 
@@ -4113,13 +4216,18 @@ void dsi_panel_calc_dsi_transfer_time(struct dsi_host_common_cfg *config,
 	struct dsi_mode_info *timing = &mode->timing;
 	struct dsi_display_mode *display_mode;
 	u32 jitter_numer, jitter_denom, prefill_lines;
-	u32 min_threshold_us, prefill_time_us, max_transfer_us;
+	u32 min_threshold_us, prefill_time_us, max_transfer_us, packet_overhead;
 	u16 bpp;
 
-	/* Packet overlead in bits,2 bytes header + 2 bytes checksum
-	 * + 1 byte dcs data command.
+	/* Packet overhead in bits,
+	 * DPHY: 4 bytes header + 2 bytes checksum + 1 byte dcs data command.
+	 * CPHY: 8 bytes header + 4 bytes checksum + 2 bytes SYNC +
+	 * 1 byte dcs data command.
 	*/
-	const u32 packet_overhead = 56;
+	if (config->phy_type & DSI_PHY_TYPE_CPHY)
+		packet_overhead = 120;
+	else
+		packet_overhead = 56;
 
 	display_mode = container_of(timing, struct dsi_display_mode, timing);
 

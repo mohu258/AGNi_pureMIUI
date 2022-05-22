@@ -86,6 +86,13 @@ struct dsi_dfps_capabilities {
 	bool dfps_support;
 };
 
+struct dsi_qsync_capabilities {
+	/* qsync disabled if qsync_min_fps = 0 */
+	u32 qsync_min_fps;
+	u32 *qsync_min_fps_list;
+	int qsync_min_fps_list_len;
+};
+
 struct dsi_dyn_clk_caps {
 	bool dyn_clk_support;
 	u32 *bit_clk_list;
@@ -178,6 +185,13 @@ struct dsi_panel_spr_info {
 	enum msm_display_spr_pack_type pack_type;
 };
 
+struct dsi_tlmm_gpio {
+	u32 num;
+	u32 addr;
+	u32 size;
+	const char *name;
+};
+
 struct dsi_panel;
 
 struct dsi_panel_ops {
@@ -188,6 +202,7 @@ struct dsi_panel_ops {
 	int (*bl_register)(struct dsi_panel *panel);
 	int (*bl_unregister)(struct dsi_panel *panel);
 	int (*parse_gpios)(struct dsi_panel *panel);
+	int (*parse_power_cfg)(struct dsi_panel *panel);
 };
 
 struct dsi_panel {
@@ -234,7 +249,7 @@ struct dsi_panel {
 
 	bool panel_initialized;
 	bool te_using_watchdog_timer;
-	u32 qsync_min_fps;
+	struct dsi_qsync_capabilities qsync_caps;
 
 	char dce_pps_cmd[DSI_CMD_PPS_SIZE];
 	enum dsi_dms_mode dms_mode;
@@ -248,6 +263,9 @@ struct dsi_panel {
 	int panel_test_gpio;
 	int power_mode;
 	enum dsi_panel_physical_type panel_type;
+
+	struct dsi_tlmm_gpio *tlmm_gpio;
+	u32 tlmm_gpio_count;
 
 	struct dsi_panel_ops panel_ops;
 
@@ -292,7 +310,7 @@ struct dsi_panel *dsi_panel_get(struct device *parent,
 				int topology_override,
 				bool trusted_vm_env);
 
-int dsi_panel_trigger_esd_attack(struct dsi_panel *panel);
+int dsi_panel_trigger_esd_attack(struct dsi_panel *panel, bool trusted_vm_env);
 
 void dsi_panel_put(struct dsi_panel *panel);
 
@@ -388,4 +406,15 @@ int dsi_panel_apply_requested_fod_hbm(struct dsi_panel *panel);
 void dsi_panel_set_fod_ui(struct dsi_panel *panel, bool status);
 void dsi_panel_request_fod_hbm(struct dsi_panel *panel, bool status);
 
+int dsi_panel_get_cmd_pkt_count(const char *data, u32 length, u32 *cnt);
+
+int dsi_panel_alloc_cmd_packets(struct dsi_panel_cmd_set *cmd,
+		u32 packet_count);
+
+int dsi_panel_create_cmd_packets(const char *data, u32 length, u32 count,
+					struct dsi_cmd_desc *cmd);
+
+void dsi_panel_destroy_cmd_packets(struct dsi_panel_cmd_set *set);
+
+void dsi_panel_dealloc_cmd_packets(struct dsi_panel_cmd_set *set);
 #endif /* _DSI_PANEL_H_ */
