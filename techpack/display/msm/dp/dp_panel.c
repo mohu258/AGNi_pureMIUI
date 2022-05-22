@@ -9,6 +9,7 @@
 #include "dp_debug.h"
 #include <drm/drm_dsc.h>
 #include "sde_dsc_helper.h"
+#include <drm/drm_edid.h>
 
 #define DP_KHZ_TO_HZ 1000
 #define DP_PANEL_DEFAULT_BPP 24
@@ -1180,8 +1181,11 @@ static void _dp_panel_dsc_bw_overhead_calc(struct dp_panel *dp_panel,
 	int tot_num_hor_bytes, tot_num_dummy_bytes;
 	int dwidth_dsc_bytes, eoc_bytes;
 	u32 num_lanes;
+	struct dp_panel_private *panel;
 
-	num_lanes = dp_panel->link_info.num_lanes;
+	panel = container_of(dp_panel, struct dp_panel_private, dp_panel);
+
+	num_lanes = panel->link->link_params.lane_count;
 	num_slices = dsc->slice_per_pkt;
 
 	eoc_bytes = dsc_byte_cnt % num_lanes;
@@ -1354,9 +1358,28 @@ static int dp_panel_dsc_prepare_basic_params(
 	u32 ppr_per_slice;
 	u32 slice_caps_1;
 	u32 slice_caps_2;
+	u32 dsc_version_major, dsc_version_minor;
+	bool dsc_version_supported = false;
 
-	comp_info->dsc_info.config.dsc_version_major = 0x1;
-	comp_info->dsc_info.config.dsc_version_minor = 0x1;
+	dsc_version_major = dp_panel->sink_dsc_caps.version & 0xF;
+	dsc_version_minor = (dp_panel->sink_dsc_caps.version >> 4) & 0xF;
+	dsc_version_supported = (dsc_version_major == 0x1 &&
+			(dsc_version_minor == 0x1 || dsc_version_minor == 0x2))
+			? true : false;
+
+	DP_DEBUG("DSC version: %d.%d, dpcd value: %x\n",
+			dsc_version_major, dsc_version_minor,
+			dp_panel->sink_dsc_caps.version);
+
+	if (!dsc_version_supported) {
+		dsc_version_major = 1;
+		dsc_version_minor = 1;
+		DP_ERR("invalid sink DSC version, fallback to %d.%d\n",
+				dsc_version_major, dsc_version_minor);
+	}
+
+	comp_info->dsc_info.config.dsc_version_major = dsc_version_major;
+	comp_info->dsc_info.config.dsc_version_minor = dsc_version_minor;
 	comp_info->dsc_info.scr_rev = 0x0;
 
 	comp_info->dsc_info.slice_per_pkt = 0;
@@ -1419,7 +1442,9 @@ static int dp_panel_dsc_prepare_basic_params(
 	comp_info->dsc_info.config.pic_height = dp_mode->timing.v_active;
 	comp_info->dsc_info.config.slice_width = slice_width;
 
-	if (comp_info->dsc_info.config.pic_height % 16 == 0)
+	if (comp_info->dsc_info.config.pic_height % 108 == 0)
+		comp_info->dsc_info.config.slice_height = 108;
+	else if (comp_info->dsc_info.config.pic_height % 16 == 0)
 		comp_info->dsc_info.config.slice_height = 16;
 	else if (comp_info->dsc_info.config.pic_height % 12 == 0)
 		comp_info->dsc_info.config.slice_height = 12;
@@ -1592,7 +1617,25 @@ static int dp_panel_set_default_link_params(struct dp_panel *dp_panel)
 	return 0;
 }
 
-static int dp_panel_set_edid(struct dp_panel *dp_panel, u8 *edid)
+static bool dp_panel_validate_edid(struct edid *edid, size_t edid_size)
+{
+	if (!edid || (edid_size < EDID_LENGTH))
+		return false;
+
+	if (EDID_LENGTH * (edid->extensions + 1) > edid_size) {
+		DP_ERR("edid size does not match allocated.\n");
+		return false;
+	}
+
+	if (!drm_edid_is_valid(edid)) {
+		DP_ERR("invalid edid.\n");
+		return false;
+	}
+	return true;
+}
+
+static int dp_panel_set_edid(struct dp_panel *dp_panel, u8 *edid,
+		size_t edid_size)
 {
 	struct dp_panel_private *panel;
 
@@ -1603,7 +1646,7 @@ static int dp_panel_set_edid(struct dp_panel *dp_panel, u8 *edid)
 
 	panel = container_of(dp_panel, struct dp_panel_private, dp_panel);
 
-	if (edid) {
+	if (edid && dp_panel_validate_edid((struct edid *)edid, edid_size)) {
 		dp_panel->edid_ctrl->edid = (struct edid *)edid;
 		panel->custom_edid = true;
 	} else {
@@ -1832,18 +1875,23 @@ end:
 static u32 dp_panel_get_supported_bpp(struct dp_panel *dp_panel,
 		u32 mode_edid_bpp, u32 mode_pclk_khz)
 {
-	struct drm_dp_link *link_info;
+	struct dp_link_params *link_params;
+	struct dp_panel_private *panel;
 	const u32 max_supported_bpp = 30;
 	u32 min_supported_bpp = 18;
 	u32 bpp = 0, data_rate_khz = 0;
+
+	panel = container_of(dp_panel, struct dp_panel_private, dp_panel);
 
 	if (dp_panel->dsc_en)
 		min_supported_bpp = 24;
 
 	bpp = min_t(u32, mode_edid_bpp, max_supported_bpp);
 
-	link_info = &dp_panel->link_info;
-	data_rate_khz = link_info->num_lanes * link_info->rate * 8;
+	link_params = &panel->link->link_params;
+
+	data_rate_khz = link_params->lane_count *
+		drm_dp_bw_code_to_link_rate(link_params->bw_code) * 8;
 
 	for (; bpp > min_supported_bpp; bpp -= 6) {
 		if (dp_panel->dsc_en) {
@@ -2192,7 +2240,7 @@ static void dp_panel_config_dsc(struct dp_panel *dp_panel, bool enable)
 		dsc->be_in_lane = _dp_panel_calc_be_in_lane(dp_panel);
 		dsc->dsc_en = true;
 		dsc->dto_en = true;
-
+		dsc->continuous_pps = dp_panel->dsc_continuous_pps;
 		dp_panel_get_dto_params(comp_info->comp_ratio, &dsc->dto_n,
 				&dsc->dto_d, pinfo->bpp);
 	} else {
@@ -2200,6 +2248,7 @@ static void dp_panel_config_dsc(struct dp_panel *dp_panel, bool enable)
 		dsc->dto_en = false;
 		dsc->dto_n = 0;
 		dsc->dto_d = 0;
+		dsc->continuous_pps = false;
 	}
 
 	catalog->stream_id = dp_panel->stream_id;
@@ -2332,32 +2381,6 @@ static int dp_panel_deinit_panel_info(struct dp_panel *dp_panel, u32 flags)
 	dp_panel->lane_count = 0;
 
 	return rc;
-}
-
-static u32 dp_panel_get_min_req_link_rate(struct dp_panel *dp_panel)
-{
-	const u32 encoding_factx10 = 8;
-	u32 min_link_rate_khz = 0, lane_cnt;
-	struct dp_panel_info *pinfo;
-
-	if (!dp_panel) {
-		DP_ERR("invalid input\n");
-		goto end;
-	}
-
-	lane_cnt = dp_panel->link_info.num_lanes;
-	pinfo = &dp_panel->pinfo;
-
-	/* num_lanes * lane_count * 8 >= pclk * bpp * 10 */
-	min_link_rate_khz = pinfo->pixel_clk_khz /
-				(lane_cnt * encoding_factx10);
-	min_link_rate_khz *= pinfo->bpp;
-
-	DP_DEBUG("min lclk req=%d khz for pclk=%d khz, lanes=%d, bpp=%d\n",
-		min_link_rate_khz, pinfo->pixel_clk_khz, lane_cnt,
-		pinfo->bpp);
-end:
-	return min_link_rate_khz;
 }
 
 static bool dp_panel_hdr_supported(struct dp_panel *dp_panel)
@@ -2620,8 +2643,9 @@ cached:
 		dp_panel_setup_dhdr_vsif(panel);
 
 		input.mdp_clk = core_clk_rate;
-		input.lclk = dp_panel->link_info.rate;
-		input.nlanes = dp_panel->link_info.num_lanes;
+		input.lclk = drm_dp_bw_code_to_link_rate(
+				panel->link->link_params.bw_code);
+		input.nlanes = panel->link->link_params.lane_count;
 		input.pclk = dp_panel->pinfo.pixel_clk_khz;
 		input.h_active = dp_panel->pinfo.h_active;
 		input.mst_target_sc = dp_panel->mst_target_sc;
@@ -3022,6 +3046,7 @@ struct dp_panel *dp_panel_get(struct dp_panel_in *in)
 
 	dp_panel->dsc_feature_enable = panel->parser->dsc_feature_enable;
 	dp_panel->fec_feature_enable = panel->parser->fec_feature_enable;
+	dp_panel->dsc_continuous_pps = panel->parser->dsc_continuous_pps;
 
 	if (in->base_panel) {
 		memcpy(dp_panel->dpcd, in->base_panel->dpcd,
@@ -3041,7 +3066,6 @@ struct dp_panel *dp_panel_get(struct dp_panel_in *in)
 	dp_panel->deinit = dp_panel_deinit_panel_info;
 	dp_panel->hw_cfg = dp_panel_hw_cfg;
 	dp_panel->read_sink_caps = dp_panel_read_sink_caps;
-	dp_panel->get_min_req_link_rate = dp_panel_get_min_req_link_rate;
 	dp_panel->get_mode_bpp = dp_panel_get_mode_bpp;
 	dp_panel->get_modes = dp_panel_get_modes;
 	dp_panel->handle_sink_request = dp_panel_handle_sink_request;

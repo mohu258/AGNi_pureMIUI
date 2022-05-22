@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2021, The Linux Foundation. All rights reserved.
  */
 
 
@@ -256,6 +256,9 @@ static void dsi_bridge_enable(struct drm_bridge *bridge)
 		DSI_ERR("[%d] DSI display post enabled failed, rc=%d\n",
 		       c_bridge->id, rc);
 
+	if (display)
+		display->enabled = true;
+
 	if (display && display->drm_conn) {
 		sde_connector_helper_bridge_enable(display->drm_conn);
 		if (c_bridge->dsi_mode.dsi_mode_flags & DSI_MODE_FLAG_POMS)
@@ -278,6 +281,9 @@ static void dsi_bridge_disable(struct drm_bridge *bridge)
 	display = c_bridge->display;
 	private_flags =
 		bridge->encoder->crtc->state->adjusted_mode.private_flags;
+
+	if (display)
+		display->enabled = false;
 
 	if (display && display->drm_conn) {
 		display->poms_pending =
@@ -529,6 +535,29 @@ u64 dsi_drm_find_bit_clk_rate(void *display,
 	return bit_clk_rate;
 }
 
+int dsi_conn_get_lm_from_mode(void *display, const struct drm_display_mode *drm_mode)
+{
+	struct dsi_display *dsi_display = display;
+	struct dsi_display_mode dsi_mode, *panel_dsi_mode;
+	int rc = -EINVAL;
+
+	if (!dsi_display || !drm_mode) {
+		DSI_ERR("Invalid params %d %d\n", !display, !drm_mode);
+		return rc;
+	}
+
+	convert_to_dsi_mode(drm_mode, &dsi_mode);
+
+	rc = dsi_display_find_mode(dsi_display, &dsi_mode, &panel_dsi_mode);
+	if (rc) {
+		DSI_ERR("mode not found %d\n", rc);
+		drm_mode_debug_printmodeline(drm_mode);
+		return rc;
+	}
+
+	return panel_dsi_mode->priv_info->topology.num_lm;
+}
+
 int dsi_conn_get_mode_info(struct drm_connector *connector,
 		const struct drm_display_mode *drm_mode,
 		struct msm_mode_info *mode_info,
@@ -652,14 +681,16 @@ int dsi_conn_set_info_blob(struct drm_connector *connector,
 	case DSI_OP_VIDEO_MODE:
 		sde_kms_info_add_keystr(info, "panel mode", "video");
 		sde_kms_info_add_keystr(info, "qsync support",
-				panel->qsync_min_fps ? "true" : "false");
+				panel->qsync_caps.qsync_min_fps ?
+				"true" : "false");
 		break;
 	case DSI_OP_CMD_MODE:
 		sde_kms_info_add_keystr(info, "panel mode", "command");
 		sde_kms_info_add_keyint(info, "mdp_transfer_time_us",
 				mode_info->mdp_transfer_time_us);
 		sde_kms_info_add_keystr(info, "qsync support",
-				panel->qsync_min_fps ? "true" : "false");
+				panel->qsync_caps.qsync_min_fps ?
+				"true" : "false");
 		break;
 	default:
 		DSI_DEBUG("invalid panel type:%d\n", panel->panel_mode);
@@ -1073,14 +1104,24 @@ int dsi_conn_post_kickoff(struct drm_connector *connector,
 			return -EINVAL;
 		}
 
+		/*
+		 * When both DFPS and dynamic clock switch with constant
+		 * fps features are enabled, wait for dynamic refresh done
+		 * only in case of clock switch.
+		 * In case where only fps changes, clock remains same.
+		 * So, wait for dynamic refresh done is not required.
+		 */
 		if ((ctrl_version >= DSI_CTRL_VERSION_2_5) &&
-				(dyn_clk_caps->maintain_const_fps)) {
+			(dyn_clk_caps->maintain_const_fps) &&
+			(adj_mode.dsi_mode_flags & DSI_MODE_FLAG_DYN_CLK)) {
 			display_for_each_ctrl(i, display) {
 				ctrl = &display->ctrl[i];
 				rc = dsi_ctrl_wait4dynamic_refresh_done(
 						ctrl->ctrl);
 				if (rc)
 					DSI_ERR("wait4dfps refresh failed\n");
+				dsi_display_dfps_update_parent(display);
+				dsi_phy_dynamic_refresh_clear(ctrl->phy);
 			}
 		}
 
@@ -1174,7 +1215,7 @@ void dsi_conn_set_allowed_mode_switch(struct drm_connector *connector,
 	struct list_head *mode_list = &connector->modes;
 	struct dsi_display *disp = display;
 	struct dsi_panel *panel;
-	int mode_count, rc = 0;
+	int mode_count = 0, rc = 0;
 	struct dsi_display_mode_priv_info *dsi_mode_info, *cmp_dsi_mode_info;
 	bool allow_switch = false;
 
@@ -1184,7 +1225,8 @@ void dsi_conn_set_allowed_mode_switch(struct drm_connector *connector,
 	}
 
 	panel = disp->panel;
-	mode_count = panel->num_display_modes;
+	list_for_each_entry(drm_mode, &connector->modes, head)
+		mode_count++;
 
 	list_for_each_entry(drm_mode, &connector->modes, head) {
 
@@ -1202,6 +1244,8 @@ void dsi_conn_set_allowed_mode_switch(struct drm_connector *connector,
 		mode_list = mode_list->next;
 		cmp_mode_idx = 1;
 		list_for_each_entry(cmp_drm_mode, mode_list, head) {
+			if (&cmp_drm_mode->head == &connector->modes)
+				continue;
 			convert_to_dsi_mode(cmp_drm_mode, &dsi_mode);
 
 			rc = dsi_display_find_mode(display, &dsi_mode,
