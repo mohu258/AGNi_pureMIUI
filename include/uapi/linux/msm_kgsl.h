@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
- * Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
  */
 
 #ifndef _UAPI_MSM_KGSL_H
@@ -341,6 +341,8 @@ enum kgsl_timestamp_type {
 #define KGSL_PROP_GAMING_BIN		0x26
 #define KGSL_PROP_QUERY_CAPABILITIES	0x27
 #define KGSL_PROP_CONTEXT_PROPERTY	0x28
+#define KGSL_PROP_GPU_MODEL		0x29
+#define KGSL_PROP_VK_DEVICE_ID		0x2A
 
 /*
  * kgsl_capabilities_properties returns a list of supported properties.
@@ -423,6 +425,10 @@ struct kgsl_context_property_fault {
 	__u32 timestamp;
 };
 
+struct kgsl_gpu_model {
+	char gpu_model[32];
+};
+
 /* Context property sub types */
 #define KGSL_CONTEXT_PROP_FAULTS 1
 
@@ -464,7 +470,14 @@ struct kgsl_context_property_fault {
 #define KGSL_PERFCOUNTER_GROUP_CP_PWR 0x21
 #define KGSL_PERFCOUNTER_GROUP_GPMU_PWR 0x22
 #define KGSL_PERFCOUNTER_GROUP_ALWAYSON_PWR 0x23
-#define KGSL_PERFCOUNTER_GROUP_MAX 0x24
+#define KGSL_PERFCOUNTER_GROUP_GLC 0x24
+#define KGSL_PERFCOUNTER_GROUP_FCHE 0x25
+#define KGSL_PERFCOUNTER_GROUP_MHUB 0x26
+#define KGSL_PERFCOUNTER_GROUP_GMU_XOCLK 0x27
+#define KGSL_PERFCOUNTER_GROUP_GMU_GMUCLK  0x28
+#define KGSL_PERFCOUNTER_GROUP_GMU_PERF  0x29
+#define KGSL_PERFCOUNTER_GROUP_SW 0x2a
+#define KGSL_PERFCOUNTER_GROUP_MAX 0x2b
 
 #define KGSL_PERFCOUNTER_NOT_USED 0xFFFFFFFF
 #define KGSL_PERFCOUNTER_BROKEN 0xFFFFFFFE

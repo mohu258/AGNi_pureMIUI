@@ -4,7 +4,7 @@
  */
 #include <linux/cpufreq_times.h>
 #include "sched.h"
-#include "walt.h"
+#include "walt/walt.h"
 
 #ifdef CONFIG_IRQ_TIME_ACCOUNTING
 
@@ -482,6 +482,7 @@ void thread_group_cputime_adjusted(struct task_struct *p, u64 *ut, u64 *st)
 	*ut = cputime.utime;
 	*st = cputime.stime;
 }
+EXPORT_SYMBOL_GPL(thread_group_cputime_adjusted);
 
 #else /* !CONFIG_VIRT_CPU_ACCOUNTING_NATIVE: */
 
@@ -696,6 +697,8 @@ void thread_group_cputime_adjusted(struct task_struct *p, u64 *ut, u64 *st)
 	thread_group_cputime(p, &cputime);
 	cputime_adjust(&cputime, &p->signal->prev_cputime, ut, st);
 }
+EXPORT_SYMBOL_GPL(thread_group_cputime_adjusted);
+
 #endif /* !CONFIG_VIRT_CPU_ACCOUNTING_NATIVE */
 
 #ifdef CONFIG_VIRT_CPU_ACCOUNTING_GEN

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (c) 2018-2020, The Linux Foundation. All rights reserved. */
+/* Copyright (c) 2018-2021, The Linux Foundation. All rights reserved. */
 
 #include <linux/debugfs.h>
 #include <linux/delay.h>
@@ -210,16 +210,22 @@ static int __mhi_download_rddm_in_panic(struct mhi_controller *mhi_cntrl)
 	int ret;
 	u32 rx_status;
 	enum mhi_ee ee;
-	const u32 delayus = 5000;
-	u32 retry = (mhi_cntrl->timeout_ms * 1000) / delayus;
-	const u32 rddm_timeout_us = 200000;
-	int rddm_retry = rddm_timeout_us / delayus; /* time to enter rddm */
+	const u32 delayms = 5;
+	u32 retry = (mhi_cntrl->timeout_ms) / delayms;
+	const u32 rddm_timeout_ms = 250;
+	int rddm_retry = rddm_timeout_ms / delayms; /* time to enter rddm */
 	void __iomem *base = mhi_cntrl->bhie;
 
 	MHI_CNTRL_LOG("Entered with pm_state:%s dev_state:%s ee:%s\n",
 			to_mhi_pm_state_str(mhi_cntrl->pm_state),
 			TO_MHI_STATE_STR(mhi_cntrl->dev_state),
 			TO_MHI_EXEC_STR(mhi_cntrl->ee));
+
+	if (mhi_cntrl->ee == MHI_EE_PBL) {
+		MHI_CNTRL_LOG("Aborting RDDM dumps as device is in %s state\n",
+				 TO_MHI_EXEC_STR(mhi_cntrl->ee));
+		return -EACCES;
+	}
 
 	/*
 	 * This should only be executing during a kernel panic, we expect all
@@ -256,7 +262,7 @@ static int __mhi_download_rddm_in_panic(struct mhi_controller *mhi_cntrl)
 			if (ee == MHI_EE_RDDM)
 				break;
 
-			udelay(delayus);
+			mdelay(delayms);
 		}
 
 		if (rddm_retry <= 0) {
@@ -266,7 +272,7 @@ static int __mhi_download_rddm_in_panic(struct mhi_controller *mhi_cntrl)
 			mhi_cntrl->write_reg(mhi_cntrl, mhi_cntrl->regs,
 				      MHI_SOC_RESET_REQ_OFFSET,
 				      MHI_SOC_RESET_REQ);
-			udelay(delayus);
+			mdelay(delayms);
 		}
 
 		ee = mhi_get_exec_env(mhi_cntrl);
@@ -287,7 +293,7 @@ static int __mhi_download_rddm_in_panic(struct mhi_controller *mhi_cntrl)
 			return 0;
 		}
 
-		udelay(delayus);
+		mdelay(delayms);
 	}
 
 	ee = mhi_get_exec_env(mhi_cntrl);
@@ -524,7 +530,7 @@ int mhi_alloc_bhie_table(struct mhi_controller *mhi_cntrl,
 		if (!mhi_buf->buf)
 			goto error_alloc_segment;
 
-		MHI_CNTRL_LOG("Entry:%d Address:0x%llx size:%lu\n", i,
+		MHI_CNTRL_LOG("Entry:%d Address:0x%llx size:%zu\n", i,
 			mhi_buf->dma_addr, mhi_buf->len);
 	}
 

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2010-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2010-2021, The Linux Foundation. All rights reserved.
  */
 
+#include <linux/interconnect.h>
 #include <linux/of_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
@@ -14,6 +15,7 @@
 #include "kgsl_pwrscale.h"
 #include "kgsl_sysfs.h"
 #include "kgsl_trace.h"
+#include "kgsl_util.h"
 
 #define UPDATE_BUSY_VAL		1000000
 
@@ -38,6 +40,7 @@ static const char * const clocks[] = {
 	"gmu_clk",
 	"ahb_clk",
 	"smmu_vote",
+	"apb_pclk",
 };
 
 static void kgsl_pwrctrl_clk(struct kgsl_device *device, int state,
@@ -273,14 +276,14 @@ void kgsl_pwrctrl_set_constraint(struct kgsl_device *device,
 		pwrc_old->sub_type = pwrc->sub_type;
 		pwrc_old->hint.pwrlevel.level = constraint;
 		pwrc_old->owner_id = id;
-		pwrc_old->expires = jiffies + device->pwrctrl.interval_timeout;
+		pwrc_old->expires = jiffies + msecs_to_jiffies(device->pwrctrl.interval_timeout);
 		kgsl_pwrctrl_pwrlevel_change(device, constraint);
 		/* Trace the constraint being set by the driver */
 		trace_kgsl_constraint(device, pwrc_old->type, constraint, 1);
 	} else if ((pwrc_old->type == pwrc->type) &&
 		(pwrc_old->hint.pwrlevel.level == constraint)) {
 		pwrc_old->owner_id = id;
-		pwrc_old->expires = jiffies + device->pwrctrl.interval_timeout;
+		pwrc_old->expires = jiffies + msecs_to_jiffies(device->pwrctrl.interval_timeout);
 	}
 }
 
@@ -294,7 +297,8 @@ static void kgsl_pwrctrl_set_thermal_pwrlevel(struct kgsl_device *device,
 	if (level >= pwr->num_pwrlevels)
 		level = pwr->num_pwrlevels - 1;
 
-	pwr->thermal_pwrlevel = level;
+	pwr->sysfs_thermal_pwrlevel = level;
+	pwr->thermal_pwrlevel = max(pwr->cooling_thermal_pwrlevel, pwr->sysfs_thermal_pwrlevel);
 
 	/* Update the current level using the new limit */
 	kgsl_pwrctrl_pwrlevel_change(device, pwr->active_pwrlevel);
@@ -528,7 +532,7 @@ static ssize_t __timer_store(struct device *dev, struct device_attribute *attr,
 	mutex_lock(&device->mutex);
 	/* Let the timeout be requested in ms, but convert to jiffies. */
 	if (timer == KGSL_PWR_IDLE_TIMER)
-		device->pwrctrl.interval_timeout = msecs_to_jiffies(val);
+		device->pwrctrl.interval_timeout = val;
 
 	mutex_unlock(&device->mutex);
 
@@ -548,8 +552,7 @@ static ssize_t idle_timer_show(struct device *dev,
 	struct kgsl_device *device = dev_get_drvdata(dev);
 
 	/* Show the idle_timeout converted to msec */
-	return scnprintf(buf, PAGE_SIZE, "%u\n",
-		jiffies_to_msecs(device->pwrctrl.interval_timeout));
+	return scnprintf(buf, PAGE_SIZE, "%u\n", device->pwrctrl.interval_timeout);
 }
 
 static ssize_t minbw_timer_store(struct device *dev,
@@ -945,8 +948,9 @@ static ssize_t _max_clock_mhz_store(struct kgsl_device *device,
 		return level;
 
 	/*
-	 * Confusingly this node has been setting the thermal pwrlevel despite
-	 * it's name
+	 * You would think this would set max_pwrlevel but the legacy behavior
+	 * is that it set thermal_pwrlevel instead so we don't want to mess with
+	 * that.
 	 */
 	kgsl_pwrctrl_set_thermal_pwrlevel(device, level);
 	return count;
@@ -1328,8 +1332,15 @@ static int enable_regulators(struct kgsl_device *device)
 		return 0;
 
 	ret = enable_regulator(&device->pdev->dev, pwr->cx_gdsc, "vddcx");
-	if (!ret)
-		ret = enable_regulator(&device->pdev->dev, pwr->gx_gdsc, "vdd");
+	if (!ret) {
+		/* Set parent in retention voltage to power up vdd supply */
+		ret = kgsl_regulator_set_voltage(device->dev,
+				pwr->gx_gdsc_parent,
+				pwr->gx_gdsc_parent_min_corner);
+		if (!ret)
+			ret = enable_regulator(&device->pdev->dev,
+					pwr->gx_gdsc, "vdd");
+	}
 
 	if (ret) {
 		clear_bit(KGSL_PWRFLAGS_POWER_ON, &pwr->power_flags);
@@ -1542,6 +1553,8 @@ int kgsl_pwrctrl_init(struct kgsl_device *device)
 	pwr->max_pwrlevel = 0;
 	pwr->min_pwrlevel = pwr->num_pwrlevels - 1;
 	pwr->thermal_pwrlevel = 0;
+	pwr->sysfs_thermal_pwrlevel = 0;
+	pwr->cooling_thermal_pwrlevel = 0;
 	pwr->thermal_pwrlevel_floor = pwr->min_pwrlevel;
 
 	pwr->wakeup_maxpwrlevel = 0;
@@ -1572,6 +1585,24 @@ int kgsl_pwrctrl_init(struct kgsl_device *device)
 	if (of_property_read_bool(pdev->dev.of_node, "vdd-supply"))
 		pwr->gx_gdsc = devm_regulator_get(&pdev->dev, "vdd");
 
+	if (of_property_read_bool(pdev->dev.of_node, "vdd-parent-supply")) {
+		pwr->gx_gdsc_parent = devm_regulator_get(&pdev->dev,
+				"vdd-parent");
+		if (IS_ERR(pwr->gx_gdsc_parent)) {
+			dev_err(device->dev,
+				"Failed to get vdd-parent regulator:%d\n",
+				PTR_ERR(pwr->gx_gdsc_parent));
+			return -ENODEV;
+		}
+		if (of_property_read_u32(pdev->dev.of_node,
+					"vdd-parent-min-corner",
+					&pwr->gx_gdsc_parent_min_corner)) {
+			dev_err(device->dev,
+				"vdd-parent-min-corner not found\n");
+			return -ENODEV;
+		}
+	}
+
 	pwr->power_flags = 0;
 
 	pm_runtime_enable(&pdev->dev);
@@ -1590,6 +1621,8 @@ void kgsl_pwrctrl_close(struct kgsl_device *device)
 	kgsl_bus_close(device);
 
 	pm_runtime_disable(&device->pdev->dev);
+
+	icc_put(device->l3_icc);
 }
 
 void kgsl_idle_check(struct work_struct *work)
@@ -1652,9 +1685,7 @@ done:
 			kgsl_pwrctrl_request_state(device, KGSL_STATE_NONE);
 
 		if (device->state == KGSL_STATE_ACTIVE)
-			mod_timer(&device->idle_timer,
-					jiffies +
-					device->pwrctrl.interval_timeout);
+			kgsl_start_idle_timer(device);
 	}
 
 	if (device->state != KGSL_STATE_MINBW)
@@ -1727,16 +1758,24 @@ static int kgsl_pwrctrl_enable(struct kgsl_device *device)
 	return device->ftbl->regulator_enable(device);
 }
 
-static void kgsl_pwrctrl_disable(struct kgsl_device *device)
+void kgsl_pwrctrl_clear_l3_vote(struct kgsl_device *device)
 {
 	int status;
 
-	status = clk_set_rate(device->l3_clk, device->l3_freq[0]);
+	if (IS_ERR(device->l3_icc))
+		return;
+
+	status = icc_set_bw(device->l3_icc, 0, device->l3_freq[0]);
 	if (!status)
 		device->cur_l3_pwrlevel = 0;
 	else
 		dev_err(device->dev, "Could not clear l3_vote: %d\n",
 			     status);
+}
+
+static void kgsl_pwrctrl_disable(struct kgsl_device *device)
+{
+	kgsl_pwrctrl_clear_l3_vote(device);
 
 	/* Order pwrrail/clk sequence based upon platform */
 	device->ftbl->regulator_disable(device);
@@ -1835,6 +1874,7 @@ static int _wake(struct kgsl_device *device)
 		/* Turn on the core clocks */
 		kgsl_pwrctrl_clk(device, KGSL_PWRFLAGS_ON, KGSL_STATE_ACTIVE);
 
+		device->ftbl->deassert_gbif_halt(device);
 		/*
 		 * No need to turn on/off irq here as it no longer affects
 		 * power collapse
@@ -1850,8 +1890,7 @@ static int _wake(struct kgsl_device *device)
 		kgsl_pwrctrl_pwrlevel_change_settings(device, 1);
 		/* All settings for power level transitions are complete*/
 		pwr->previous_pwrlevel = pwr->active_pwrlevel;
-		mod_timer(&device->idle_timer, jiffies +
-				device->pwrctrl.interval_timeout);
+		kgsl_start_idle_timer(device);
 		del_timer_sync(&device->pwrctrl.minbw_timer);
 		break;
 	case KGSL_STATE_AWARE:
@@ -1859,8 +1898,7 @@ static int _wake(struct kgsl_device *device)
 		/* Enable state before turning on irq */
 		kgsl_pwrctrl_set_state(device, KGSL_STATE_ACTIVE);
 		kgsl_pwrctrl_irq(device, KGSL_PWRFLAGS_ON);
-		mod_timer(&device->idle_timer, jiffies +
-				device->pwrctrl.interval_timeout);
+		kgsl_start_idle_timer(device);
 		del_timer_sync(&device->pwrctrl.minbw_timer);
 		break;
 	default:
@@ -1921,12 +1959,11 @@ _nap(struct kgsl_device *device)
 {
 	switch (device->state) {
 	case KGSL_STATE_ACTIVE:
-		if (!device->ftbl->is_hw_collapsible(device)) {
+		if (!device->ftbl->prepare_for_power_off(device)) {
 			kgsl_pwrctrl_request_state(device, KGSL_STATE_NONE);
 			return -EBUSY;
 		}
 
-		device->ftbl->stop_fault_timer(device);
 		kgsl_pwrscale_midframe_timer_cancel(device);
 
 		/*
@@ -1984,7 +2021,7 @@ _slumber(struct kgsl_device *device)
 
 	switch (device->state) {
 	case KGSL_STATE_ACTIVE:
-		if (!device->ftbl->is_hw_collapsible(device)) {
+		if (!device->ftbl->prepare_for_power_off(device)) {
 			kgsl_pwrctrl_request_state(device, KGSL_STATE_NONE);
 			return -EBUSY;
 		}

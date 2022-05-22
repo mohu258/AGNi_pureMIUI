@@ -3,7 +3,7 @@
  *
  * This code is based on drivers/scsi/ufs/ufshcd.c
  * Copyright (C) 2011-2013 Samsung India Software Operations
- * Copyright (c) 2013-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2021, The Linux Foundation. All rights reserved.
  *
  * Authors:
  *	Santosh Yaraganavi <santosh.sy@samsung.com>
@@ -107,7 +107,7 @@
 #define UFSHCD_REF_CLK_GATING_WAIT_US 0xFF /* microsecs */
 
 /* Polling time to wait for fDeviceInit  */
-#define FDEVICEINIT_COMPL_TIMEOUT 1500 /* millisecs */
+#define FDEVICEINIT_COMPL_TIMEOUT 5000 /* millisecs */
 
 #define ufshcd_toggle_vreg(_dev, _vreg, _on)				\
 	({                                                              \
@@ -287,7 +287,14 @@ static int ufshcd_wb_buf_flush_disable(struct ufs_hba *hba);
 int ufshcd_wb_ctrl(struct ufs_hba *hba, bool enable);
 static int ufshcd_wb_toggle_flush_during_h8(struct ufs_hba *hba, bool set);
 static inline void ufshcd_wb_toggle_flush(struct ufs_hba *hba, bool enable);
-
+#if defined(CONFIG_SCSI_UFSHCD_QTI)
+static int ufshcd_set_dev_pwr_mode(struct ufs_hba *hba,
+				enum ufs_dev_pwr_mode pwr_mode);
+static int ufshcd_config_vreg(struct device *dev,
+				struct ufs_vreg *vreg, bool on);
+static int ufshcd_enable_vreg(struct device *dev, struct ufs_vreg *vreg);
+static int ufshcd_disable_vreg(struct device *dev, struct ufs_vreg *vreg);
+#endif
 static inline bool ufshcd_valid_tag(struct ufs_hba *hba, int tag)
 {
 	return tag >= 0 && tag < hba->nutrs;
@@ -393,27 +400,27 @@ static void ufshcd_add_command_trace(struct ufs_hba *hba,
 	u8 opcode = 0;
 	u32 intr, doorbell;
 	struct ufshcd_lrb *lrbp = &hba->lrb[tag];
+	struct scsi_cmnd *cmd = lrbp->cmd;
 	int transfer_len = -1;
 
 	if (!trace_ufshcd_command_enabled()) {
 		/* trace UPIU W/O tracing command */
-		if (lrbp->cmd)
+		if (cmd)
 			ufshcd_add_cmd_upiu_trace(hba, tag, str);
 		return;
 	}
 
-	if (lrbp->cmd) { /* data phase exists */
+	if (cmd) { /* data phase exists */
 		/* trace UPIU also */
 		ufshcd_add_cmd_upiu_trace(hba, tag, str);
-		opcode = (u8)(*lrbp->cmd->cmnd);
+		opcode = cmd->cmnd[0];
 		if ((opcode == READ_10) || (opcode == WRITE_10)) {
 			/*
 			 * Currently we only fully trace read(10) and write(10)
 			 * commands
 			 */
-			if (lrbp->cmd->request && lrbp->cmd->request->bio)
-				lba =
-				  lrbp->cmd->request->bio->bi_iter.bi_sector;
+			if (cmd->request && cmd->request->bio)
+				lba = cmd->request->bio->bi_iter.bi_sector;
 			transfer_len = be32_to_cpu(
 				lrbp->ucd_req_ptr->sc.exp_data_transfer_len);
 		}
@@ -1007,7 +1014,8 @@ static int ufshcd_set_clk_freq(struct ufs_hba *hba, bool scale_up)
 	list_for_each_entry(clki, head, list) {
 		if (!IS_ERR_OR_NULL(clki->clk)) {
 			if (scale_up && clki->max_freq) {
-				if (clki->curr_freq == clki->max_freq)
+				if ((clki->curr_freq == clki->max_freq) ||
+				   (!strcmp(clki->name, "core_clk_ice_hw_ctl")))
 					continue;
 
 				ret = clk_set_rate(clki->clk, clki->max_freq);
@@ -1025,7 +1033,8 @@ static int ufshcd_set_clk_freq(struct ufs_hba *hba, bool scale_up)
 				clki->curr_freq = clki->max_freq;
 
 			} else if (!scale_up && clki->min_freq) {
-				if (clki->curr_freq == clki->min_freq)
+				if ((clki->curr_freq == clki->min_freq) ||
+				   (!strcmp(clki->name, "core_clk_ice_hw_ctl")))
 					continue;
 
 				ret = clk_set_rate(clki->clk, clki->min_freq);
@@ -2066,12 +2075,12 @@ void ufshcd_send_command(struct ufs_hba *hba, unsigned int task_tag)
 	lrbp->issue_time_stamp = ktime_get();
 	lrbp->compl_time_stamp = ktime_set(0, 0);
 	ufshcd_vops_setup_xfer_req(hba, task_tag, (lrbp->cmd ? true : false));
+	ufshcd_add_command_trace(hba, task_tag, "send");
 	ufshcd_clk_scaling_start_busy(hba);
 	__set_bit(task_tag, &hba->outstanding_reqs);
 	ufshcd_writel(hba, 1 << task_tag, REG_UTP_TRANSFER_REQ_DOOR_BELL);
 	/* Make sure that doorbell is committed immediately */
 	wmb();
-	ufshcd_add_command_trace(hba, task_tag, "send");
 }
 
 /**
@@ -2664,7 +2673,6 @@ static int ufshcd_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *cmd)
 		ufshcd_release(hba);
 		lrbp->cmd = NULL;
 		clear_bit_unlock(tag, &hba->lrb_in_use);
-		ufshcd_release(hba);
 		goto out;
 	}
 	lrbp->req_abort_skip = false;
@@ -6329,7 +6337,7 @@ static irqreturn_t ufshcd_sl_intr(struct ufs_hba *hba, u32 intr_status)
  */
 static irqreturn_t ufshcd_intr(int irq, void *__hba)
 {
-	u32 intr_status, enabled_intr_status;
+	u32 intr_status, enabled_intr_status = 0;
 	irqreturn_t retval = IRQ_NONE;
 	struct ufs_hba *hba = __hba;
 	int retries = hba->nutrs;
@@ -6345,7 +6353,7 @@ static irqreturn_t ufshcd_intr(int irq, void *__hba)
 	 * read, make sure we handle them by checking the interrupt status
 	 * again in a loop until we process all of the reqs before returning.
 	 */
-	do {
+	while (intr_status && retries--) {
 		enabled_intr_status =
 			intr_status & ufshcd_readl(hba, REG_INTERRUPT_ENABLE);
 		if (intr_status)
@@ -6358,9 +6366,9 @@ static irqreturn_t ufshcd_intr(int irq, void *__hba)
 			retval = IRQ_HANDLED;
 #endif
 		intr_status = ufshcd_readl(hba, REG_INTERRUPT_STATUS);
-	} while (intr_status && --retries);
+	}
 
-	if (retval == IRQ_NONE) {
+	if (enabled_intr_status && retval == IRQ_NONE) {
 		dev_err(hba->dev, "%s: Unhandled interrupt 0x%08x\n",
 					__func__, intr_status);
 		ufshcd_dump_regs(hba, 0, UFSHCI_REG_SPACE_SIZE, "host_regs: ");
@@ -6867,7 +6875,7 @@ static int ufshcd_abort(struct scsi_cmnd *cmd)
 			/* command completed already */
 			dev_err(hba->dev, "%s: cmd at tag %d successfully cleared from DB.\n",
 				__func__, tag);
-			goto out;
+			goto cleanup;
 		} else {
 			dev_err(hba->dev,
 				"%s: no response from device. tag = %d, err %d\n",
@@ -6901,6 +6909,7 @@ static int ufshcd_abort(struct scsi_cmnd *cmd)
 		goto out;
 	}
 
+cleanup:
 	spin_lock_irqsave(host->host_lock, flags);
 	__ufshcd_transfer_req_compl(hba, (1UL << tag));
 	spin_unlock_irqrestore(host->host_lock, flags);
@@ -7179,6 +7188,40 @@ static inline void ufshcd_blk_pm_runtime_init(struct scsi_device *sdev)
 	scsi_autopm_put_device(sdev);
 }
 
+ #if defined(CONFIG_SCSI_UFSHCD_QTI)
+static int ufshcd_set_low_vcc_level(struct ufs_hba *hba)
+{
+	int ret;
+	struct ufs_vreg *vreg = hba->vreg_info.vcc;
+
+	/* Check if device supports the low voltage VCC feature */
+	if (hba->dev_info.wspecversion < 0x300)
+		return 0;
+	/*
+	 * Check if host has support for low VCC voltage?
+	 * In addition, also check if we have already set the low VCC level
+	 * or not?
+	 */
+	if (!vreg->low_voltage_sup || vreg->low_voltage_active)
+		return 0;
+
+	/* Put the device in sleep before lowering VCC level */
+	ret = ufshcd_set_dev_pwr_mode(hba, UFS_SLEEP_PWR_MODE);
+
+	/* Switch off VCC before switching it ON at 2.5v */
+	ret = ufshcd_disable_vreg(hba->dev, vreg);
+	/* add ~2ms delay before renabling VCC at lower voltage */
+	usleep_range(2000, 2100);
+	/* Now turn back VCC ON at low voltage */
+	vreg->low_voltage_active = true;
+	ret = ufshcd_enable_vreg(hba->dev, vreg);
+
+	/* Bring the device in active now */
+	ret = ufshcd_set_dev_pwr_mode(hba, UFS_ACTIVE_PWR_MODE);
+
+	return ret;
+}
+#endif
 /**
  * ufshcd_scsi_add_wlus - Adds required W-LUs
  * @hba: per-adapter instance
@@ -7738,6 +7781,10 @@ static int ufshcd_add_lus(struct ufs_hba *hba)
 	if (ret)
 		goto out;
 
+#if defined(CONFIG_SCSI_UFSHCD_QTI)
+	ufshcd_set_low_vcc_level(hba);
+#endif
+
 	/* Initialize devfreq after UFS device is detected */
 	if (ufshcd_is_clkscaling_supported(hba)) {
 		memcpy(&hba->clk_scaling.saved_pwr_info.info,
@@ -7755,7 +7802,6 @@ static int ufshcd_add_lus(struct ufs_hba *hba)
 
 	ufs_bsg_probe(hba);
 	scsi_scan_host(hba->host);
-	pm_runtime_put_sync(hba->dev);
 
 out:
 	return ret;
@@ -7772,9 +7818,15 @@ static int ufshcd_probe_hba(struct ufs_hba *hba, bool async)
 {
 	int ret;
 	unsigned long flags;
+#if defined(CONFIG_SCSI_UFSHCD_QTI)
+	bool reinit_needed = true;
+#endif
 	ktime_t start = ktime_get();
 
 	dev_err(hba->dev, "*** This is %s ***\n", __FILE__);
+#if defined(CONFIG_SCSI_UFSHCD_QTI)
+reinit:
+#endif
 	ret = ufshcd_link_startup(hba);
 	if (ret)
 		goto out;
@@ -7809,6 +7861,34 @@ static int ufshcd_probe_hba(struct ufs_hba *hba, bool async)
 			goto out;
 	}
 
+#if defined(CONFIG_SCSI_UFSHCD_QTI)
+	/*
+	 * After reading the device descriptor, it is found as UFS 2.x
+	 * device and limit_phy_submode is set as 1 in DT file i.e
+	 * host phy is calibrated with gear4 setting, we need to
+	 * reinitialize UFS phy host with HS-Gear3, Rate B.
+	 */
+	if (hba->dev_info.wspecversion < 0x300 &&
+		hba->limit_phy_submode && reinit_needed) {
+		unsigned long flags;
+		int err;
+
+		ufshcd_vops_device_reset(hba);
+
+		/* Reset the host controller */
+		spin_lock_irqsave(hba->host->host_lock, flags);
+		ufshcd_hba_stop(hba, false);
+		spin_unlock_irqrestore(hba->host->host_lock, flags);
+
+		hba->limit_phy_submode = 0;
+		err = ufshcd_hba_enable(hba);
+		if (err)
+			goto out;
+		reinit_needed = false;
+
+		goto reinit;
+	}
+#endif
 	ufshcd_tune_unipro_params(hba);
 
 	/* UFS device is also active now */
@@ -7882,10 +7962,10 @@ out:
 	 * present, turn off the power/clocks etc.
 	 */
 	if (ret) {
-		pm_runtime_put_sync(hba->dev);
 		ufshcd_exit_clk_scaling(hba);
 		ufshcd_hba_exit(hba);
 	}
+	pm_runtime_put_sync(hba->dev);
 }
 
 static enum blk_eh_timer_return ufshcd_eh_timed_out(struct scsi_cmnd *scmd)
@@ -8038,6 +8118,10 @@ static int ufshcd_config_vreg(struct device *dev,
 
 		if (vreg->min_uV && vreg->max_uV) {
 			min_uV = on ? vreg->min_uV : 0;
+#if defined(CONFIG_SCSI_UFSHCD_QTI)
+			if (vreg->low_voltage_sup && !vreg->low_voltage_active && on)
+				min_uV = vreg->max_uV;
+#endif
 			ret = regulator_set_voltage(reg, min_uV, vreg->max_uV);
 			if (ret) {
 				dev_err(dev,
@@ -8191,7 +8275,17 @@ static int __ufshcd_setup_clocks(struct ufs_hba *hba, bool on,
 
 	list_for_each_entry(clki, head, list) {
 		if (!IS_ERR_OR_NULL(clki->clk)) {
+#if defined(CONFIG_SCSI_UFSHCD_QTI)
+			/*
+			 * To keep link active, ref_clk and core_clk_unipro
+			 * should be kept ON.
+			 */
+			if (skip_ref_clk &&
+				(!strcmp(clki->name, "ref_clk") ||
+				 !strcmp(clki->name, "core_clk_unipro")))
+#else
 			if (skip_ref_clk && !strcmp(clki->name, "ref_clk"))
+#endif
 				continue;
 
 			clk_state_changed = on ^ clki->enabled;
@@ -8252,7 +8346,8 @@ static int ufshcd_init_clocks(struct ufs_hba *hba)
 		goto out;
 
 	list_for_each_entry(clki, head, list) {
-		if (!clki->name)
+		if ((!clki->name) ||
+		   (!strcmp(clki->name, "core_clk_ice_hw_ctl")))
 			continue;
 
 		clki->clk = devm_clk_get(dev, clki->name);
@@ -8769,10 +8864,9 @@ static int ufshcd_suspend(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 	ret = ufshcd_link_state_transition(hba, req_link_state, 1);
 	if (ret)
 		goto set_dev_active;
-#if defined(CONFIG_SCSI_UFSHCD_QTI)
-	if (!hba->auto_bkops_enabled)
-#endif
+#if !defined(CONFIG_SCSI_UFSHCD_QTI)
 		ufshcd_vreg_set_lpm(hba);
+#endif
 
 disable_clks:
 	/*
@@ -8803,6 +8897,10 @@ disable_clks:
 
 	/* Put the host controller in low power mode if possible */
 	ufshcd_hba_vreg_set_lpm(hba);
+#if defined(CONFIG_SCSI_UFSHCD_QTI)
+	if (!hba->auto_bkops_enabled)
+		ufshcd_vreg_set_lpm(hba);
+#endif
 	goto out;
 
 set_link_active:
@@ -8857,17 +8955,29 @@ static int ufshcd_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 	old_pwr_mode = hba->curr_dev_pwr_mode;
 
 	ufshcd_hba_vreg_set_hpm(hba);
+#if defined(CONFIG_SCSI_UFSHCD_QTI)
+	ret = ufshcd_vreg_set_hpm(hba);
+	if (ret)
+		goto out;
+#endif
+
 	/* Make sure clocks are enabled before accessing controller */
 	ret = ufshcd_setup_clocks(hba, true);
 	if (ret)
+#if defined(CONFIG_SCSI_UFSHCD_QTI)
+		goto disable_vreg;
+#else
 		goto out;
+#endif
 
 	/* enable the host irq as host controller would be active soon */
 	ufshcd_enable_irq(hba);
 
+#if !defined(CONFIG_SCSI_UFSHCD_QTI)
 	ret = ufshcd_vreg_set_hpm(hba);
 	if (ret)
 		goto disable_irq_and_vops_clks;
+#endif
 
 	/*
 	 * Call vendor specific resume callback. As these callbacks may access
@@ -8876,7 +8986,11 @@ static int ufshcd_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 	 */
 	ret = ufshcd_vops_resume(hba, pm_op);
 	if (ret)
+#if defined(CONFIG_SCSI_UFSHCD_QTI)
+		goto disable_irq_and_vops_clks;
+#else
 		goto disable_vreg;
+#endif
 
 	if (ufshcd_is_link_hibern8(hba)) {
 		ret = ufshcd_uic_hibern8_exit(hba);
@@ -8945,8 +9059,10 @@ set_old_link_state:
 	ufshcd_link_state_transition(hba, old_link_state, 0);
 vendor_suspend:
 	ufshcd_vops_suspend(hba, pm_op);
+#if !defined(CONFIG_SCSI_UFSHCD_QTI)
 disable_vreg:
 	ufshcd_vreg_set_lpm(hba);
+#endif
 disable_irq_and_vops_clks:
 	ufshcd_disable_irq(hba);
 	if (hba->clk_scaling.is_allowed)
@@ -8957,6 +9073,10 @@ disable_irq_and_vops_clks:
 		trace_ufshcd_clk_gating(dev_name(hba->dev),
 					hba->clk_gating.state);
 	}
+#if defined(CONFIG_SCSI_UFSHCD_QTI)
+disable_vreg:
+	ufshcd_vreg_set_lpm(hba);
+#endif
 out:
 	hba->pm_op_in_progress = 0;
 	if (ret)
@@ -8980,7 +9100,8 @@ int ufshcd_system_suspend(struct ufs_hba *hba)
 	if (!hba || !hba->is_powered)
 		return 0;
 
-	if ((ufs_get_pm_lvl_to_dev_pwr_mode(hba->spm_lvl) ==
+	if (pm_runtime_suspended(hba->dev) &&
+	    (ufs_get_pm_lvl_to_dev_pwr_mode(hba->spm_lvl) ==
 	     hba->curr_dev_pwr_mode) &&
 	    (ufs_get_pm_lvl_to_link_pwr_state(hba->spm_lvl) ==
 	     hba->uic_link_state))
@@ -9158,11 +9279,7 @@ int ufshcd_shutdown(struct ufs_hba *hba)
 			scsi_remove_device(sdev);
 	}
 #else
-	if (pm_runtime_suspended(hba->dev)) {
-		ret = ufshcd_runtime_resume(hba);
-		if (ret)
-			goto out;
-	}
+	pm_runtime_get_sync(hba->dev);
 #endif
 
 	ret = ufshcd_suspend(hba, UFS_SHUTDOWN_PM);
@@ -9300,8 +9417,9 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 	if ((hba->ufs_version != UFSHCI_VERSION_10) &&
 	    (hba->ufs_version != UFSHCI_VERSION_11) &&
 	    (hba->ufs_version != UFSHCI_VERSION_20) &&
-	    (hba->ufs_version != UFSHCI_VERSION_21))
-		dev_err(hba->dev, "invalid UFS version 0x%x\n",
+	    (hba->ufs_version != UFSHCI_VERSION_21) &&
+	    (hba->ufs_version != UFSHCI_VERSION_30))
+		dev_err(hba->dev, "invalid UFS controller version 0x%x\n",
 			hba->ufs_version);
 
 	/* Get Interrupt bit mask per version */

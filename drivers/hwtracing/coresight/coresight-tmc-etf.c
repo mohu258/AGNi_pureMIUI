@@ -218,8 +218,10 @@ out:
 		kfree(buf);
 
 	if (!ret) {
-		coresight_cti_map_trigin(drvdata->cti_reset, 5, 0);
-		coresight_cti_map_trigout(drvdata->cti_flush, 1, 0);
+		coresight_cti_map_trigin(drvdata->cti_reset,
+				drvdata->cti_reset_trig_num, 0);
+		coresight_cti_map_trigout(drvdata->cti_flush,
+				drvdata->cti_flush_trig_num, 0);
 		dev_info(&csdev->dev, "TMC-ETB/ETF enabled\n");
 	}
 
@@ -233,6 +235,7 @@ static int tmc_enable_etf_sink_perf(struct coresight_device *csdev, void *data)
 	unsigned long flags;
 	struct tmc_drvdata *drvdata = dev_get_drvdata(csdev->dev.parent);
 	struct perf_output_handle *handle = data;
+	struct cs_buffers *buf = etm_perf_sink_config(handle);
 
 	spin_lock_irqsave(&drvdata->spinlock, flags);
 	do {
@@ -249,7 +252,7 @@ static int tmc_enable_etf_sink_perf(struct coresight_device *csdev, void *data)
 		}
 
 		/* Get a handle on the pid of the process to monitor */
-		pid = task_pid_nr(handle->event->owner);
+		pid = buf->pid;
 
 		if (drvdata->pid != -1 && drvdata->pid != pid) {
 			ret = -EBUSY;
@@ -333,8 +336,10 @@ static int tmc_disable_etf_sink(struct coresight_device *csdev)
 
 	spin_unlock_irqrestore(&drvdata->spinlock, flags);
 
-	coresight_cti_unmap_trigin(drvdata->cti_reset, 0, 0);
-	coresight_cti_unmap_trigout(drvdata->cti_flush, 1, 0);
+	coresight_cti_unmap_trigin(drvdata->cti_reset,
+			drvdata->cti_reset_trig_num, 0);
+	coresight_cti_unmap_trigout(drvdata->cti_flush,
+			drvdata->cti_flush_trig_num, 0);
 	dev_dbg(&csdev->dev, "TMC-ETB/ETF disabled\n");
 	return 0;
 }
@@ -407,6 +412,7 @@ static void *tmc_alloc_etf_buffer(struct coresight_device *csdev,
 	if (!buf)
 		return NULL;
 
+	buf->pid = task_pid_nr(event->owner);
 	buf->snapshot = overwrite;
 	buf->nr_pages = nr_pages;
 	buf->data_pages = pages;

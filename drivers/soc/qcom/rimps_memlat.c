@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2013 - 2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013 - 2021, The Linux Foundation. All rights reserved.
  */
 
 #define pr_fmt(fmt) "rimps-memlat: " fmt
@@ -87,6 +87,13 @@ enum mon_type {
 	MAX_MEMLAT_DEVICE_TYPE
 };
 
+enum pmu_cache_status {
+	PMU_CACHE_INVALID,
+	PMU_CACHE_VALID,
+	PMU_MAP_INVALID,
+	PMU_CACHE_STATUS_MAX
+};
+
 struct core_dev_map {
 	u32 core_mhz;
 	u32 target_freq;
@@ -95,7 +102,8 @@ struct core_dev_map {
 struct cpu_pmu_ctrs {
 	uint32_t ccntr_lo;
 	uint32_t ccntr_hi;
-	uint32_t evcntr[MAX_EVCNTRS];
+	uint32_t evcntr[CONFIG_QTI_HW_NUM_PMU];
+	uint32_t amu_evcntr[CONFIG_QTI_HW_NUM_AMU * 2];
 	uint32_t valid;
 	uint32_t unused0;
 };
@@ -199,7 +207,12 @@ static ssize_t store_##name(struct kobject *kobj,			\
 	unsigned int val;						\
 	struct memlat_mon *mon = to_memlat_mon(kobj);			\
 	struct memlat_cpu_grp *cpu_grp = mon->cpu_grp;			\
-	struct scmi_memlat_vendor_ops *ops = cpu_grp->handle->memlat_ops;	\
+	struct scmi_memlat_vendor_ops *ops = NULL;			\
+	if (cpu_grp && cpu_grp->handle &&				\
+			cpu_grp->handle->memlat_ops)			\
+		ops = cpu_grp->handle->memlat_ops;			\
+	else								\
+		return -ENODEV;						\
 	ret = kstrtouint(buf, 10, &val);				\
 	if (ret < 0)							\
 		return ret;						\
@@ -240,9 +253,15 @@ static ssize_t store_min_freq(struct kobject *kobj,
 	unsigned int val;
 	struct memlat_mon *mon = to_memlat_mon(kobj);
 	struct memlat_cpu_grp *cpu_grp = mon->cpu_grp;
-	struct scmi_memlat_vendor_ops *ops = cpu_grp->handle->memlat_ops;
+	struct scmi_memlat_vendor_ops *ops = NULL;
 	unsigned int min_freq;
 	unsigned int max_freq;
+
+	if (cpu_grp && cpu_grp->handle &&
+			cpu_grp->handle->memlat_ops)
+		ops = cpu_grp->handle->memlat_ops;
+	else
+		return -ENODEV;
 
 	if (mon->mon_type == L3_MEMLAT) {
 		min_freq = l3_freqs[0];
@@ -279,9 +298,15 @@ static ssize_t store_max_freq(struct kobject *kobj,
 	unsigned int val;
 	struct memlat_mon *mon = to_memlat_mon(kobj);
 	struct memlat_cpu_grp *cpu_grp = mon->cpu_grp;
-	struct scmi_memlat_vendor_ops *ops = cpu_grp->handle->memlat_ops;
+	struct scmi_memlat_vendor_ops *ops = NULL;
 	unsigned int min_freq;
 	unsigned int max_freq;
+
+	if (cpu_grp && cpu_grp->handle &&
+			cpu_grp->handle->memlat_ops)
+		ops = cpu_grp->handle->memlat_ops;
+	else
+		return -ENODEV;
 
 	if (mon->mon_type == L3_MEMLAT) {
 		min_freq = l3_freqs[0];
@@ -324,7 +349,7 @@ static ssize_t show_cur_freq(struct kobject *kobj, char *buf)
 	return count;
 }
 
-static ssize_t show_available_freq(struct kobject *kobj, char *buf)
+static ssize_t show_available_frequencies(struct kobject *kobj, char *buf)
 {
 	struct memlat_mon *mon = to_memlat_mon(kobj);
 	u32 i = 0;
@@ -332,7 +357,9 @@ static ssize_t show_available_freq(struct kobject *kobj, char *buf)
 
 	if (mon->mon_type == L3_MEMLAT) {
 		for (i = 0; i <= l3_pstates; i++)
-			tmp += scnprintf(tmp, PAGE_SIZE, "%u\n", l3_freqs[i]);
+			tmp += scnprintf(tmp, PAGE_SIZE, "%u ", l3_freqs[i]);
+
+		tmp += scnprintf(tmp, PAGE_SIZE, "\n");
 	}
 	return (tmp - buf);
 }
@@ -414,7 +441,7 @@ memlat_mon_attr_rw(l2wb_pct);
 memlat_mon_attr_rw(l2wb_filter);
 memlat_mon_attr_rw(log_level);
 memlat_mon_attr_ro(cur_freq);
-memlat_mon_attr_ro(available_freq);
+memlat_mon_attr_ro(available_frequencies);
 
 static struct attribute *mon_dev_attr[] = {
 	&ratio_ceil.attr,
@@ -425,7 +452,7 @@ static struct attribute *mon_dev_attr[] = {
 	&l2wb_pct.attr,
 	&l2wb_filter.attr,
 	&cur_freq.attr,
-	&available_freq.attr,
+	&available_frequencies.attr,
 	NULL,
 };
 
@@ -472,22 +499,26 @@ static struct perf_event *set_event(int event_id, unsigned int cpu,
 }
 
 static int setup_common_pmu_events(struct memlat_cpu_grp *cpu_grp,
-				cpumask_t *mask)
+				cpumask_t *mask, bool cpu_online)
 {
-	struct perf_event_attr *attr = alloc_attr();
+	struct perf_event_attr *attr;
 	struct perf_event *pevent;
 	unsigned int cpu;
+
+	attr = alloc_attr();
+	if (!attr)
+		return -ENODEV;
 
 	for_each_cpu(cpu, mask) {
 		struct pmu_map *pmu = to_common_pmu_map(cpu_grp, cpu);
 		struct cpu_data *cpus_data = to_cpu_data(cpu_grp, cpu);
 
-		if (per_cpu(cpu_is_hp, cpu))
+		if (!cpu_online && per_cpu(cpu_is_hp, cpu))
 			continue;
 
 		pevent = set_event(cpu_grp->common_ev_ids[INST_IDX],
 						cpu, attr);
-		if (IS_ERR(pevent))
+		if (!pevent || IS_ERR(pevent))
 			return -ENODEV;
 
 		cpus_data->common_evs[INST_IDX] = pevent;
@@ -495,7 +526,7 @@ static int setup_common_pmu_events(struct memlat_cpu_grp *cpu_grp,
 		pmu[INST_IDX].hw_cntr_idx = pevent->hw.idx + 1;
 
 		pevent = set_event(cpu_grp->common_ev_ids[CYC_IDX], cpu, attr);
-		if (IS_ERR(pevent)) {
+		if (!pevent || IS_ERR(pevent)) {
 			perf_event_release_kernel(
 					cpus_data->common_evs[INST_IDX]);
 			return -ENODEV;
@@ -507,7 +538,7 @@ static int setup_common_pmu_events(struct memlat_cpu_grp *cpu_grp,
 
 		if (cpu_grp->common_ev_ids[STALL_IDX] != INVALID_PMU_EVENT_ID) {
 			pevent = set_event(cpu_grp->common_ev_ids[STALL_IDX], cpu, attr);
-			if (IS_ERR(pevent)) {
+			if (!pevent || IS_ERR(pevent)) {
 				perf_event_release_kernel(
 					cpus_data->common_evs[INST_IDX]);
 				perf_event_release_kernel(
@@ -523,24 +554,30 @@ static int setup_common_pmu_events(struct memlat_cpu_grp *cpu_grp,
 			pmu[STALL_IDX].hw_cntr_idx = INVALID_PMU_HW_IDX;
 		}
 	}
+	kfree(attr);
 	return 0;
 }
 
-static int setup_mon_pmu_events(struct memlat_mon *mon, cpumask_t *mask)
+static int setup_mon_pmu_events(struct memlat_mon *mon,
+					cpumask_t *mask, bool cpu_online)
 {
-	struct perf_event_attr *attr = alloc_attr();
+	struct perf_event_attr *attr;
 	struct perf_event *pevent;
 	unsigned int cpu;
+
+	attr = alloc_attr();
+	if (!attr)
+		return -ENODEV;
 
 	for_each_cpu(cpu, mask) {
 		struct pmu_map *pmu = to_mon_pmu_map(mon, cpu);
 		struct mon_data *ev_data = to_mon_ev_data(mon, cpu);
 
-		if (per_cpu(cpu_is_hp, cpu))
+		if (!cpu_online && per_cpu(cpu_is_hp, cpu))
 			continue;
 
 		pevent = set_event(mon->mon_ev_ids[MISS_IDX], cpu, attr);
-		if (IS_ERR(pevent))
+		if (!pevent || IS_ERR(pevent))
 			return -ENODEV;
 
 		ev_data->mon_evs[MISS_IDX] = pevent;
@@ -550,7 +587,7 @@ static int setup_mon_pmu_events(struct memlat_mon *mon, cpumask_t *mask)
 		if (mon->mon_ev_ids[L2WB_IDX] != INVALID_PMU_EVENT_ID) {
 			pevent = set_event(mon->mon_ev_ids[L2WB_IDX],
 						cpu, attr);
-			if (IS_ERR(pevent)) {
+			if (!pevent || IS_ERR(pevent)) {
 				perf_event_release_kernel(
 					ev_data->mon_evs[MISS_IDX]);
 				return -ENODEV;
@@ -568,7 +605,7 @@ static int setup_mon_pmu_events(struct memlat_mon *mon, cpumask_t *mask)
 
 			pevent = set_event(mon->mon_ev_ids[L3_ACCESS_IDX],
 						cpu, attr);
-			if (IS_ERR(pevent)) {
+			if (!pevent || IS_ERR(pevent)) {
 				perf_event_release_kernel(
 					ev_data->mon_evs[MISS_IDX]);
 				if (ev_data->mon_evs[L2WB_IDX])
@@ -586,6 +623,7 @@ static int setup_mon_pmu_events(struct memlat_mon *mon, cpumask_t *mask)
 			pmu[L3_ACCESS_IDX].hw_cntr_idx = INVALID_PMU_HW_IDX;
 		}
 	}
+	kfree(attr);
 	return 0;
 }
 
@@ -597,7 +635,7 @@ static inline void store_event_val(u64 val, u8 idx, u8 cpu)
 	if (idx == 0) {
 		writel_relaxed((val & (0xFFFFFFFF)), &base->ccntr_lo);
 		writel_relaxed(((val >> 32) & (0xFFFFFFFF)), &base->ccntr_hi);
-	} else if (idx < MAX_PMU_CNTRS_RIMPS) {
+	} else if ((idx > 1) && (idx < MAX_PMU_CNTRS_RIMPS)) {
 		writel_relaxed((val & (0xFFFFFFFF)), &base->evcntr[idx - 2]);
 	}
 }
@@ -620,10 +658,13 @@ static void save_cpugrp_pmu_events(struct memlat_cpu_grp *cpu_grp, u8 cpu)
 	for (i = 0; i < NUM_COMMON_EVS; i++) {
 		u8 hw_id = pmu[i].hw_cntr_idx;
 
-		if (hw_id == INVALID_PMU_HW_IDX)
+		if ((hw_id == INVALID_PMU_HW_IDX) ||
+				!cpus_data->common_evs[i])
 			continue;
+
 		perf_event_read_local(cpus_data->common_evs[i],
 				&ev_count, NULL, NULL);
+		ev_count = local64_read(&cpus_data->common_evs[i]->hw.prev_count);
 		store_event_val(ev_count, hw_id, cpu);
 	}
 }
@@ -639,10 +680,13 @@ static void save_mon_pmu_events(struct memlat_mon *mon, u8 cpu)
 	for (i = 0; i < NUM_MON_EVS; i++) {
 		u8 hw_id = pmu[i].hw_cntr_idx;
 
-		if (hw_id == INVALID_PMU_HW_IDX)
+		if (hw_id == INVALID_PMU_HW_IDX ||
+				!ev_data->mon_evs[i])
 			continue;
+
 		perf_event_read_local(ev_data->mon_evs[i],
 				&ev_count, NULL, NULL);
+		ev_count = local64_read(&ev_data->mon_evs[i]->hw.prev_count);
 		store_event_val(ev_count, hw_id, cpu);
 	}
 }
@@ -658,6 +702,7 @@ static void free_common_evs(struct memlat_cpu_grp *cpu_grp, cpumask_t *mask)
 			if (!cpus_data->common_evs[i])
 				continue;
 			perf_event_release_kernel(cpus_data->common_evs[i]);
+			cpus_data->common_evs[i] = NULL;
 		}
 	}
 }
@@ -674,22 +719,19 @@ static void free_mon_evs(struct memlat_mon *mon, cpumask_t *mask)
 				continue;
 
 			perf_event_release_kernel(ev_data->mon_evs[i]);
+			ev_data->mon_evs[i] = NULL;
 		}
 	}
 }
 
 static int memlat_hp_restart_events(unsigned int cpu, bool cpu_up)
 {
-	struct perf_event_attr *attr = alloc_attr();
 	struct memlat_cpu_grp *cpu_grp = per_cpu(per_cpu_grp, cpu);
 	struct scmi_memlat_vendor_ops *ops;
 	struct memlat_mon *mon;
 	int ret = 0;
 	unsigned int i = 0;
 	cpumask_t mask = CPU_MASK_NONE;
-
-	if (!attr)
-		return -ENOMEM;
 
 	if (!cpu_grp)
 		goto exit;
@@ -698,8 +740,11 @@ static int memlat_hp_restart_events(unsigned int cpu, bool cpu_up)
 
 	cpumask_set_cpu(cpu, &mask);
 
+	if (cpu_up)
+		set_pmu_cache_flag(PMU_MAP_INVALID, cpu);
+
 	if (cpu_up) {
-		ret = setup_common_pmu_events(cpu_grp, &mask);
+		ret = setup_common_pmu_events(cpu_grp, &mask, true);
 		if (ret < 0) {
 			pr_err("failed to setup common PMU cpu = %d ret %d\n",
 					cpu, ret);
@@ -726,7 +771,7 @@ static int memlat_hp_restart_events(unsigned int cpu, bool cpu_up)
 		if (!cpumask_test_cpu(cpu, &mon->cpus))
 			continue;
 		if (cpu_up) {
-			ret = setup_mon_pmu_events(mon, &mask);
+			ret = setup_mon_pmu_events(mon, &mask, true);
 			if (ret < 0) {
 				pr_err("mon events failed on cpu %d ret %d\n",
 						cpu, ret);
@@ -747,16 +792,19 @@ static int memlat_hp_restart_events(unsigned int cpu, bool cpu_up)
 			free_mon_evs(mon, &mask);
 		}
 	}
-	set_pmu_cache_flag(!cpu_up, cpu);
+	set_pmu_cache_flag(cpu_up ? PMU_CACHE_INVALID : PMU_CACHE_VALID, cpu);
 exit:
-	kfree(attr);
 	return ret;
 }
 
 static int memlat_event_hotplug_coming_up(unsigned int cpu)
 {
-	per_cpu(cpu_is_hp, cpu) = false;
-	return memlat_hp_restart_events(cpu, true);
+	int ret;
+
+	ret = memlat_hp_restart_events(cpu, true);
+	if (!ret)
+		per_cpu(cpu_is_hp, cpu) = false;
+	return ret;
 }
 
 static int memlat_event_hotplug_going_down(unsigned int cpu)
@@ -781,6 +829,21 @@ static int memlat_event_cpu_hp_init(void)
 	return ret;
 }
 
+void rimps_force_free_pmu_events(unsigned int flag)
+{
+	unsigned int cpu;
+
+	get_online_cpus();
+	for_each_possible_cpu(cpu) {
+		if (flag)
+			memlat_event_hotplug_going_down(cpu);
+		else
+			memlat_event_hotplug_coming_up(cpu);
+	}
+	put_online_cpus();
+}
+EXPORT_SYMBOL(rimps_force_free_pmu_events);
+
 static int memlat_idle_notif(struct notifier_block *nb,
 					unsigned long action,
 					void *data)
@@ -803,14 +866,18 @@ static int memlat_idle_notif(struct notifier_block *nb,
 			save_cpugrp_pmu_events(cpu_grp, cpu);
 			for (i = 0; i < cpu_grp->num_mons; i++) {
 				mon = &cpu_grp->mons[i];
+				if (!cpumask_test_cpu(cpu, &mon->cpus))
+					continue;
 				save_mon_pmu_events(mon, cpu);
 			}
-			set_pmu_cache_flag(true, cpu);
+			set_pmu_cache_flag(PMU_CACHE_VALID, cpu);
 		}
 		break;
 	case CPU_PM_EXIT:
+	case CPU_PM_ENTER_FAILED:
 		__this_cpu_write(cpu_is_idle, false);
-		set_pmu_cache_flag(false, cpu);
+		if (!per_cpu(cpu_is_hp, cpu))
+			set_pmu_cache_flag(PMU_CACHE_INVALID, cpu);
 		break;
 	}
 idle_exit:
@@ -1248,17 +1315,20 @@ static int memlat_cpu_grp_probe(struct platform_device *pdev)
 		put_online_cpus();
 	}
 
-	ret = setup_common_pmu_events(cpu_grp, &cpu_grp->cpus);
+	ret = setup_common_pmu_events(cpu_grp, &cpu_grp->cpus, false);
 	if (ret < 0) {
 		dev_err(dev, "failed to setup common evs = %d\n", ret);
 		return ret;
 	}
 
 	if (!rimps_kobj) {
-		rimps_kobj = kobject_create();
-		if (!rimps_kobj)
+		rimps_kobj = kzalloc(sizeof(*rimps_kobj), GFP_KERNEL);
+
+		if (!rimps_kobj) {
 			dev_err(dev, "%s: failed to create rimps_kobj\n",
 						__func__);
+			return -ENOMEM;
+		}
 
 		ret = kobject_init_and_add(rimps_kobj, &ktype_log_level,
 				   &cpu_subsys.dev_root->kobj, "memlat");
@@ -1361,7 +1431,7 @@ static int memlat_mon_probe(struct platform_device *pdev, u32 mon_type)
 	} else {
 		mon->mon_ev_ids[L3_ACCESS_IDX] = event_id;
 	}
-	setup_mon_pmu_events(mon, &mon->cpus);
+	setup_mon_pmu_events(mon, &mon->cpus, false);
 	if (mon->mon_type == L3_MEMLAT) {
 		if (!use_cached_l3_freqs) {
 			ret = populate_opp_table(dev);

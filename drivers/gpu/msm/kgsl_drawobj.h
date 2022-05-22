@@ -123,6 +123,8 @@ TIMELINEOBJ(struct kgsl_drawobj *obj)
 	return container_of(obj, struct kgsl_drawobj_timeline, base);
 }
 
+#define KGSL_FENCE_NAME_LEN 74
+
 struct event_timeline_info {
 	u64 seqno;
 	u32 timeline;

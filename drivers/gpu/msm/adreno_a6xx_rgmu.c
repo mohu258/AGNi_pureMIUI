@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/clk-provider.h>
@@ -64,8 +64,7 @@ static void a6xx_rgmu_active_count_put(struct adreno_device *adreno_dev)
 	if (atomic_dec_and_test(&device->active_cnt)) {
 		kgsl_pwrscale_update_stats(device);
 		kgsl_pwrscale_update(device);
-		mod_timer(&device->idle_timer,
-			jiffies + device->pwrctrl.interval_timeout);
+		kgsl_start_idle_timer(device);
 	}
 
 	trace_kgsl_active_count(device,
@@ -679,7 +678,7 @@ static void halt_gbif_arb(struct adreno_device *adreno_dev)
 
 	/* Halt all AXI requests */
 	kgsl_regwrite(device, A6XX_GBIF_HALT, A6XX_GBIF_ARB_HALT_MASK);
-	adreno_wait_for_halt_ack(device, ADRENO_REG_GBIF_HALT_ACK,
+	adreno_wait_for_halt_ack(device, A6XX_GBIF_HALT_ACK,
 		A6XX_GBIF_ARB_HALT_MASK);
 
 	/* De-assert the halts */
@@ -712,6 +711,7 @@ static void a6xx_rgmu_power_off(struct adreno_device *adreno_dev)
 	a6xx_rgmu_disable_clks(adreno_dev);
 	a6xx_rgmu_disable_gdsc(adreno_dev);
 
+	kgsl_pwrctrl_clear_l3_vote(device);
 }
 
 static int a6xx_rgmu_clock_set(struct adreno_device *adreno_dev,
@@ -856,8 +856,7 @@ static void rgmu_idle_check(struct work_struct *work)
 		a6xx_power_off(adreno_dev);
 	} else {
 		kgsl_pwrscale_update(device);
-		mod_timer(&device->idle_timer,
-			jiffies + device->pwrctrl.interval_timeout);
+		kgsl_start_idle_timer(device);
 	}
 
 done:
@@ -891,8 +890,7 @@ static int a6xx_boot(struct adreno_device *adreno_dev)
 	if (ret)
 		return ret;
 
-	mod_timer(&device->idle_timer, jiffies +
-			device->pwrctrl.interval_timeout);
+	kgsl_start_idle_timer(device);
 
 	kgsl_pwrscale_wake(device);
 
@@ -947,7 +945,7 @@ static int a6xx_first_boot(struct adreno_device *adreno_dev)
 	adreno_get_bus_counters(adreno_dev);
 
 	adreno_dev->profile_buffer = kgsl_allocate_global(device, PAGE_SIZE, 0,
-				0, "alwayson");
+				0, 0, "alwayson");
 
 	adreno_dev->profile_index = 0;
 
@@ -1021,7 +1019,7 @@ no_gx_power:
 	/* Halt all gx traffic */
 	kgsl_regwrite(device, A6XX_GBIF_HALT, A6XX_GBIF_CLIENT_HALT_MASK);
 
-	adreno_wait_for_halt_ack(device, ADRENO_REG_GBIF_HALT_ACK,
+	adreno_wait_for_halt_ack(device, A6XX_GBIF_HALT_ACK,
 		A6XX_GBIF_CLIENT_HALT_MASK);
 
 	kgsl_pwrctrl_irq(device, KGSL_PWRFLAGS_OFF);
@@ -1136,7 +1134,7 @@ static void a6xx_rgmu_pm_resume(struct adreno_device *adreno_dev)
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
 	struct a6xx_rgmu_device *rgmu = to_a6xx_rgmu(adreno_dev);
 
-	if (WARN(!test_bit(GMU_PRIV_PM_SUSPEND, &rgmu->flags),
+	if (WARN(!test_bit(RGMU_PRIV_PM_SUSPEND, &rgmu->flags),
 		"resume invoked without a suspend\n"))
 		return;
 
@@ -1147,7 +1145,7 @@ static void a6xx_rgmu_pm_resume(struct adreno_device *adreno_dev)
 	adreno_dispatcher_start(device);
 }
 
-static struct gmu_dev_ops a6xx_rgmudev = {
+static const struct gmu_dev_ops a6xx_rgmudev = {
 	.oob_set = a6xx_rgmu_oob_set,
 	.oob_clear = a6xx_rgmu_oob_clear,
 	.gx_is_on = a6xx_rgmu_gx_is_on,
@@ -1296,7 +1294,13 @@ static int a6xx_rgmu_probe(struct kgsl_device *device,
 
 	device->gmu_core.gmu2gpu_offset = (res->start - device->reg_phys) >> 2;
 	device->gmu_core.reg_len = resource_size(res);
-	device->gmu_core.reg_virt = devm_ioremap_resource(&pdev->dev, res);
+	/*
+	 * We can't use devm_ioremap_resource here because we purposely double
+	 * map the gpu_cc registers for debugging purposes
+	 */
+	device->gmu_core.reg_virt = devm_ioremap(&pdev->dev,
+			res->start,
+			resource_size(res));
 
 	if (IS_ERR(device->gmu_core.reg_virt)) {
 		dev_err(&pdev->dev, "Unable to map the RGMU registers\n");

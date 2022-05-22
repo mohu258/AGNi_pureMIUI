@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2021, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/kernel.h>
@@ -36,6 +36,7 @@
 #define QCOM_CPU_PART_KRYO4XX_SILVER_V2 0x805
 
 #define QCOM_CPU_PART_KRYO6XX_SILVER_V1 0xD05
+#define QCOM_CPU_PART_KRYO6XX_GOLD 0xD41
 #define QCOM_CPU_PART_KRYO6XX_GOLDPLUS 0xD44
 
 #define L1_GOLD_IC_BIT 0x1
@@ -56,6 +57,8 @@
 #define KRYO_ERRXMISC_LVL(a)		((a >> 1) & 0x7)
 #define KRYO_ERRXMISC_LVL_GOLD(a)	(a & 0xF)
 #define KRYO_ERRXMISC_WAY(a)		((a >> 28) & 0xF)
+
+static enum cpuhp_state edac_online;
 
 static inline void set_errxctlr_el1(void)
 {
@@ -202,7 +205,6 @@ static int request_erp_irq(struct platform_device *pdev, const char *propname,
 		}
 
 		drv->ppi = r->start;
-		on_each_cpu(l1_l2_irq_enable, &(r->start), 1);
 	}
 
 	return 0;
@@ -262,6 +264,7 @@ static void dump_err_reg(int errorcode, int level, u64 errxstatus, u64 errxmisc,
 			break;
 		case QCOM_CPU_PART_KRYO4XX_GOLD:
 		case QCOM_CPU_PART_KRYO5XX_GOLD:
+		case QCOM_CPU_PART_KRYO6XX_GOLD:
 		case QCOM_CPU_PART_KRYO6XX_GOLDPLUS:
 			way = (int) KRYO_ERRXMISC_WAY(errxmisc);
 			break;
@@ -303,6 +306,7 @@ static void kryo_parse_l1_l2_cache_error(u64 errxstatus, u64 errxmisc,
 		break;
 	case QCOM_CPU_PART_KRYO4XX_GOLD:
 	case QCOM_CPU_PART_KRYO5XX_GOLD:
+	case QCOM_CPU_PART_KRYO6XX_GOLD:
 	case QCOM_CPU_PART_KRYO6XX_GOLDPLUS:
 		switch (KRYO_ERRXMISC_LVL_GOLD(errxmisc)) {
 		case L1_GOLD_DC_BIT:
@@ -488,6 +492,23 @@ static int kryo_pmu_cpu_pm_notify(struct notifier_block *self,
 	return NOTIFY_OK;
 }
 
+static int kryo_cpu_edac_online(unsigned int cpu)
+{
+	write_errselr_el1(0);
+	initialize_registers(NULL);
+
+	l1_l2_irq_enable(&(panic_handler_drvdata->ppi));
+
+	return 0;
+}
+
+static int kryo_cpu_edac_offline(unsigned int cpu)
+{
+	l1_l2_irq_disable(&(panic_handler_drvdata->ppi));
+
+	return 0;
+}
+
 static int kryo_cpu_erp_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -562,6 +583,16 @@ static int kryo_cpu_erp_probe(struct platform_device *pdev)
 		goto out_dev;
 	}
 
+	rc = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN,
+				"edac/kryo_cpu_cache_erp:online",
+				kryo_cpu_edac_online,
+				kryo_cpu_edac_offline);
+	if (rc < 0) {
+		pr_err("KRYO ERP: Could not request cpuhp setup\n");
+		goto out_dev;
+	}
+
+	edac_online = rc;
 	cpu_pm_register_notifier(&(drv->nb_pm));
 
 	return 0;
@@ -585,6 +616,7 @@ static int kryo_cpu_erp_remove(struct platform_device *pdev)
 		free_percpu(drv->erp_cpu_drvdata);
 	}
 
+	cpuhp_remove_state(edac_online);
 	cpu_pm_unregister_notifier(&(drv->nb_pm));
 	edac_device_del_device(edac_ctl->dev);
 	edac_device_free_ctl_info(edac_ctl);

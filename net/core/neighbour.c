@@ -58,6 +58,7 @@ static void neigh_update_notify(struct neighbour *neigh, u32 nlmsg_pid);
 static int pneigh_ifdown_and_unlock(struct neigh_table *tbl,
 				    struct net_device *dev);
 
+static unsigned int neigh_probe_enable;
 #ifdef CONFIG_PROC_FS
 static const struct seq_operations neigh_stat_seq_ops;
 #endif
@@ -132,6 +133,9 @@ static void neigh_update_gc_list(struct neighbour *n)
 	write_lock_bh(&n->tbl->lock);
 	write_lock(&n->lock);
 
+	if (n->dead)
+		goto out;
+
 	/* remove from the gc list if new state is permanent or if neighbor
 	 * is externally learned; otherwise entry should be on the gc list
 	 */
@@ -148,6 +152,7 @@ static void neigh_update_gc_list(struct neighbour *n)
 		atomic_inc(&n->tbl->gc_entries);
 	}
 
+out:
 	write_unlock(&n->lock);
 	write_unlock_bh(&n->tbl->lock);
 }
@@ -1086,11 +1091,19 @@ static void neigh_timer_handler(struct timer_list *t)
 		if (!mod_timer(&neigh->timer, next))
 			neigh_hold(neigh);
 	}
-	if (neigh->nud_state & (NUD_INCOMPLETE | NUD_PROBE)) {
-		neigh_probe(neigh);
+
+	if (neigh_probe_enable) {
+		if (neigh->nud_state & (NUD_INCOMPLETE | NUD_PROBE | NUD_STALE))
+			neigh_probe(neigh);
+		else
+			write_unlock(&neigh->lock);
 	} else {
+		if (neigh->nud_state & (NUD_INCOMPLETE | NUD_PROBE)) {
+			neigh_probe(neigh);
+		} else {
 out:
-		write_unlock(&neigh->lock);
+			write_unlock(&neigh->lock);
+		}
 	}
 
 	if (notify)
@@ -1242,13 +1255,14 @@ static int __neigh_update(struct neighbour *neigh, const u8 *lladdr,
 	old    = neigh->nud_state;
 	err    = -EPERM;
 
+	if (neigh->dead) {
+		NL_SET_ERR_MSG(extack, "Neighbor entry is now dead");
+		new = old;
+		goto out;
+	}
 	if (!(flags & NEIGH_UPDATE_F_ADMIN) &&
 	    (old & (NUD_NOARP | NUD_PERMANENT)))
 		goto out;
-	if (neigh->dead) {
-		NL_SET_ERR_MSG(extack, "Neighbor entry is now dead");
-		goto out;
-	}
 
 	ext_learn_change = neigh_update_ext_learned(neigh, flags, &notify);
 
@@ -1437,9 +1451,21 @@ struct neighbour *neigh_event_ns(struct neigh_table *tbl,
 {
 	struct neighbour *neigh = __neigh_lookup(tbl, saddr, dev,
 						 lladdr || !dev->addr_len);
-	if (neigh)
-		neigh_update(neigh, lladdr, NUD_STALE,
-			     NEIGH_UPDATE_F_OVERRIDE, 0);
+	if (neigh) {
+		if (neigh_probe_enable) {
+			if (neigh->nud_state != NUD_REACHABLE &&
+			    neigh->nud_state != NUD_PERMANENT) {
+				neigh_update(neigh, lladdr, NUD_STALE,
+				NEIGH_UPDATE_F_OVERRIDE, 0);
+				write_lock(&neigh->lock);
+				neigh_probe(neigh);
+				neigh_update_notify(neigh, 0);
+			}
+		} else {
+			neigh_update(neigh, lladdr, NUD_STALE,
+				     NEIGH_UPDATE_F_OVERRIDE, 0);
+		}
+	}
 	return neigh;
 }
 EXPORT_SYMBOL(neigh_event_ns);
@@ -3290,6 +3316,7 @@ static void *neigh_stat_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 		*pos = cpu+1;
 		return per_cpu_ptr(tbl->stats, cpu);
 	}
+	(*pos)++;
 	return NULL;
 }
 
@@ -3612,6 +3639,12 @@ static struct neigh_sysctl_table {
 			.extra2		= SYSCTL_INT_MAX,
 			.proc_handler	= proc_dointvec_minmax,
 		},
+		[NEIGH_VAR_PROBE] = {
+			.procname	= "neigh_probe",
+			.maxlen		= sizeof(int),
+			.mode		= 0644,
+			.proc_handler	= proc_dointvec,
+		},
 		{},
 	},
 };
@@ -3647,6 +3680,7 @@ int neigh_sysctl_register(struct net_device *dev, struct neigh_parms *p,
 		t->neigh_vars[NEIGH_VAR_GC_THRESH1].data = &tbl->gc_thresh1;
 		t->neigh_vars[NEIGH_VAR_GC_THRESH2].data = &tbl->gc_thresh2;
 		t->neigh_vars[NEIGH_VAR_GC_THRESH3].data = &tbl->gc_thresh3;
+		t->neigh_vars[NEIGH_VAR_PROBE].data  = &neigh_probe_enable;
 	}
 
 	if (handler) {
