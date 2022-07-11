@@ -116,7 +116,7 @@ static inline int udp_tunnel6_xmit_skb(struct socket *sock, struct dst_entry *ds
 #include <net/udp_tunnel.h>
 #define udp_tunnel_xmit_skb(a, b, c, d, e, f, g, h, i, j, k, l) do { struct net_device *dev__ = (c)->dev; int ret__; ret__ = udp_tunnel_xmit_skb((b)->sk_socket, a, c, d, e, f, g, h, i, j, k); if (ret__) iptunnel_xmit_stats(ret__ - 8, &dev__->stats, dev__->tstats); } while (0)
 #if IS_ENABLED(CONFIG_IPV6)
-#define udp_tunnel6_xmit_skb(a, b, c, d, e, f, g, h, i, j, k, l) udp_tunnel6_xmit_skb((b)->sk_socket, a, c, d, e, f, g, h, j, k);
+#define udp_tunnel6_xmit_skb(a, b, c, d, e, f, g, h, i, j, k, l) udp_tunnel6_xmit_skb((b)->sk_socket, a, c, d, e, f, g, h, i, j, k);
 #endif
 #elif LINUX_VERSION_CODE < KERNEL_VERSION(4, 1, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(3, 17, 0)
 #include <linux/if.h>
