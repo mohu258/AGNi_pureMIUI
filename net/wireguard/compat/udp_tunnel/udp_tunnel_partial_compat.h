@@ -128,7 +128,7 @@ static inline void __compat_fake_destructor(struct sk_buff *skb)
 #endif
 #define udp_tunnel_xmit_skb(a, b, c, d, e, f, g, h, i, j, k, l) do { struct net_device *dev__ = (c)->dev; int ret__; if (!(c)->destructor) (c)->destructor = __compat_fake_destructor; if (!(c)->sk) (c)->sk = (b); ret__ = udp_tunnel_xmit_skb(a, c, d, e, f, g, h, i, j, k, l); if (ret__) iptunnel_xmit_stats(ret__ - 8, &dev__->stats, dev__->tstats); } while (0)
 #if IS_ENABLED(CONFIG_IPV6)
-#define udp_tunnel6_xmit_skb(a, b, c, d, e, f, g, h, i, j, k, l) do { if (!(c)->destructor) (c)->destructor = __compat_fake_destructor; if (!(c)->sk) (c)->sk = (b); udp_tunnel6_xmit_skb(a, c, d, e, f, g, h, j, k, l); } while(0)
+#define udp_tunnel6_xmit_skb(a, b, c, d, e, f, g, h, i, j, k, l) do { if (!(c)->destructor) (c)->destructor = __compat_fake_destructor; if (!(c)->sk) (c)->sk = (b); udp_tunnel6_xmit_skb(a, c, d, e, f, g, h, i, j, k, l); } while(0)
 #endif
 #else
 
